@@ -6,12 +6,16 @@ use clap::{Parser, Subcommand};
 
 use crate::analysis::{Summary, summarize};
 use crate::parser::parse_plog;
+use crate::tui;
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Visualize configurable CPU and RTL pipeline logs")]
 pub struct Args {
+    /// Open a PLog file in the terminal timeline view.
+    path: Option<PathBuf>,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -26,14 +30,27 @@ enum Command {
 pub fn run() -> Result<()> {
     let args = Args::parse();
 
-    match args.command {
-        Command::Validate { path } => {
+    match (args.command, args.path) {
+        (Some(Command::Validate { path }), None) => {
             load_trace(&path)?;
             println!("valid: {}", path.display());
         }
-        Command::Report { path } => {
+        (Some(Command::Report { path }), None) => {
             let trace = load_trace(&path)?;
             print_report(&path, &summarize(&trace));
+        }
+        (None, Some(path)) => {
+            let trace = load_trace(&path)?;
+            tui::run(&path, trace)?;
+        }
+        (None, None) => {
+            Args::parse_from(["pipeview", "--help"]);
+        }
+        (Some(_), Some(path)) => {
+            anyhow::bail!(
+                "unexpected positional path `{}` before subcommand",
+                path.display()
+            );
         }
     }
 
@@ -78,6 +95,24 @@ fn print_report(path: &Path, summary: &Summary) {
         println!("stall_reasons:");
         for (reason, count) in &summary.stall_reasons {
             println!("  {reason}: {count}");
+        }
+    }
+
+    if summary.bottlenecks.is_empty() {
+        println!("bottlenecks: none");
+    } else {
+        println!("bottlenecks:");
+        for (reason, count) in &summary.bottlenecks {
+            println!("  {reason}: {count}");
+        }
+    }
+
+    if summary.status_counts.is_empty() {
+        println!("statuses: none");
+    } else {
+        println!("statuses:");
+        for (status, count) in &summary.status_counts {
+            println!("  {status}: {count}");
         }
     }
 }

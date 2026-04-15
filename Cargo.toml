@@ -6,5 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.6.1", features = ["derive"] }
+crossterm = "0.29.0"
 nom = "8.0.0"
+ratatui = { version = "0.30.1", default-features = false, features = ["crossterm", "std"] }
 thiserror = "2.0.18"

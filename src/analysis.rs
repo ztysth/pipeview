@@ -14,6 +14,8 @@ pub struct Summary {
     pub lane_count: usize,
     pub ipc: Option<f64>,
     pub stall_reasons: BTreeMap<String, u64>,
+    pub bottlenecks: BTreeMap<String, u64>,
+    pub status_counts: BTreeMap<String, u64>,
 }
 
 pub fn summarize(trace: &Trace) -> Summary {
@@ -61,6 +63,8 @@ pub fn summarize(trace: &Trace) -> Summary {
         lane_count: trace.lanes.len(),
         ipc,
         stall_reasons: stall_reasons(trace),
+        bottlenecks: bottlenecks(trace),
+        status_counts: status_counts(trace),
     }
 }
 
@@ -84,6 +88,36 @@ fn stall_reasons(trace: &Trace) -> BTreeMap<String, u64> {
             let reason = attr_value(&event.attrs, "reason").unwrap_or("unknown");
             *counts.entry(reason.to_owned()).or_insert(0) += 1;
         }
+    }
+
+    counts
+}
+
+fn bottlenecks(trace: &Trace) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+
+    for span in &trace.spans {
+        if span.lane != "main" {
+            let reason = attr_value(&span.attrs, "reason").unwrap_or("unknown");
+            let key = format!("{}:{reason}", span.lane);
+            *counts.entry(key).or_insert(0) += span.duration;
+        }
+    }
+
+    for event in &trace.events {
+        let reason = attr_value(&event.attrs, "reason").unwrap_or("unknown");
+        let key = format!("event:{}:{reason}", event.event);
+        *counts.entry(key).or_insert(0) += 1;
+    }
+
+    counts
+}
+
+fn status_counts(trace: &Trace) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+
+    for retire in &trace.retires {
+        *counts.entry(retire.status.clone()).or_insert(0) += 1;
     }
 
     counts
@@ -130,5 +164,9 @@ mod tests {
         assert_eq!(summary.stage_count, 2);
         assert_eq!(summary.lane_count, 2);
         assert_eq!(summary.stall_reasons["load_use"], 3);
+        assert_eq!(summary.bottlenecks["stall:load_use"], 2);
+        assert_eq!(summary.bottlenecks["event:stall:load_use"], 1);
+        assert_eq!(summary.status_counts["retire"], 1);
+        assert_eq!(summary.status_counts["flush"], 1);
     }
 }
