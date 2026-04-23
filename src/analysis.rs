@@ -16,6 +16,16 @@ pub struct Summary {
     pub stall_reasons: BTreeMap<String, u64>,
     pub bottlenecks: BTreeMap<String, u64>,
     pub status_counts: BTreeMap<String, u64>,
+    pub stage_occupancy: BTreeMap<String, u64>,
+    pub retired_latency: Option<LatencyStats>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LatencyStats {
+    pub count: usize,
+    pub min: u64,
+    pub max: u64,
+    pub average: f64,
 }
 
 pub fn summarize(trace: &Trace) -> Summary {
@@ -65,6 +75,8 @@ pub fn summarize(trace: &Trace) -> Summary {
         stall_reasons: stall_reasons(trace),
         bottlenecks: bottlenecks(trace),
         status_counts: status_counts(trace),
+        stage_occupancy: stage_occupancy(trace),
+        retired_latency: retired_latency(trace),
     }
 }
 
@@ -123,6 +135,55 @@ fn status_counts(trace: &Trace) -> BTreeMap<String, u64> {
     counts
 }
 
+fn stage_occupancy(trace: &Trace) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+
+    for span in &trace.spans {
+        *counts.entry(span.stage.clone()).or_insert(0) += span.duration;
+    }
+
+    counts
+}
+
+fn retired_latency(trace: &Trace) -> Option<LatencyStats> {
+    let mut first_cycle_by_inst = BTreeMap::new();
+    for span in &trace.spans {
+        first_cycle_by_inst
+            .entry(span.inst_id)
+            .and_modify(|cycle: &mut u64| *cycle = (*cycle).min(span.cycle))
+            .or_insert(span.cycle);
+    }
+
+    let mut count = 0;
+    let mut min = u64::MAX;
+    let mut max = 0;
+    let mut total = 0u128;
+
+    for retire in &trace.retires {
+        if retire.status != "retire" {
+            continue;
+        }
+        let Some(first_cycle) = first_cycle_by_inst.get(&retire.inst_id) else {
+            continue;
+        };
+        if retire.cycle < *first_cycle {
+            continue;
+        }
+        let latency = retire.cycle - first_cycle + 1;
+        count += 1;
+        min = min.min(latency);
+        max = max.max(latency);
+        total += u128::from(latency);
+    }
+
+    (count > 0).then_some(LatencyStats {
+        count,
+        min,
+        max,
+        average: total as f64 / count as f64,
+    })
+}
+
 fn attr_value<'a>(attrs: &'a [KeyValue], key: &str) -> Option<&'a str> {
     attrs
         .iter()
@@ -168,5 +229,12 @@ mod tests {
         assert_eq!(summary.bottlenecks["event:stall:load_use"], 1);
         assert_eq!(summary.status_counts["retire"], 1);
         assert_eq!(summary.status_counts["flush"], 1);
+        assert_eq!(summary.stage_occupancy["IF"], 2);
+        assert_eq!(summary.stage_occupancy["ID"], 2);
+        let latency = summary.retired_latency.expect("retired latency");
+        assert_eq!(latency.count, 1);
+        assert_eq!(latency.min, 6);
+        assert_eq!(latency.max, 6);
+        assert_eq!(latency.average, 6.0);
     }
 }

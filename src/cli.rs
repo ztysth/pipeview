@@ -115,4 +115,24 @@ fn print_report(path: &Path, summary: &Summary) {
             println!("  {status}: {count}");
         }
     }
+
+    if summary.stage_occupancy.is_empty() {
+        println!("stage_occupancy: none");
+    } else {
+        println!("stage_occupancy:");
+        for (stage, cycles) in &summary.stage_occupancy {
+            println!("  {stage}: {cycles}");
+        }
+    }
+
+    match &summary.retired_latency {
+        Some(latency) => {
+            println!("retired_latency:");
+            println!("  count: {}", latency.count);
+            println!("  min: {}", latency.min);
+            println!("  max: {}", latency.max);
+            println!("  average: {:.3}", latency.average);
+        }
+        None => println!("retired_latency: none"),
+    }
 }

@@ -57,4 +57,14 @@ fn summary_counts_cycles_ipc_statuses_and_bottlenecks() {
     assert_eq!(summary.bottlenecks["event:flush:branch_mispredict"], 1);
     assert_eq!(summary.status_counts["retire"], 2);
     assert_eq!(summary.status_counts["flush"], 1);
+    assert_eq!(summary.stage_occupancy["FE"], 3);
+    assert_eq!(summary.stage_occupancy["EX"], 4);
+    assert_eq!(summary.stage_occupancy["MEM"], 3);
+    assert_eq!(summary.stage_occupancy["COM"], 2);
+
+    let latency = summary.retired_latency.expect("retired latency");
+    assert_eq!(latency.count, 2);
+    assert_eq!(latency.min, 6);
+    assert_eq!(latency.max, 6);
+    assert_eq!(latency.average, 6.0);
 }
