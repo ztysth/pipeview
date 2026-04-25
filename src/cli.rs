@@ -107,6 +107,33 @@ fn print_report(path: &Path, summary: &Summary) {
         }
     }
 
+    if summary.top_bottlenecks.is_empty() {
+        println!("top_bottlenecks: none");
+    } else {
+        println!("top_bottlenecks:");
+        for entry in &summary.top_bottlenecks {
+            println!("  {}: {}", entry.key, entry.count);
+        }
+    }
+
+    if summary.flush_reasons.is_empty() {
+        println!("flush_reasons: none");
+    } else {
+        println!("flush_reasons:");
+        for (reason, count) in &summary.flush_reasons {
+            println!("  {reason}: {count}");
+        }
+    }
+
+    if summary.replay_reasons.is_empty() {
+        println!("replay_reasons: none");
+    } else {
+        println!("replay_reasons:");
+        for (reason, count) in &summary.replay_reasons {
+            println!("  {reason}: {count}");
+        }
+    }
+
     if summary.status_counts.is_empty() {
         println!("statuses: none");
     } else {

@@ -18,6 +18,9 @@ pub struct Summary {
     pub status_counts: BTreeMap<String, u64>,
     pub stage_occupancy: BTreeMap<String, u64>,
     pub retired_latency: Option<LatencyStats>,
+    pub flush_reasons: BTreeMap<String, u64>,
+    pub replay_reasons: BTreeMap<String, u64>,
+    pub top_bottlenecks: Vec<CountEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +29,12 @@ pub struct LatencyStats {
     pub min: u64,
     pub max: u64,
     pub average: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CountEntry {
+    pub key: String,
+    pub count: u64,
 }
 
 pub fn summarize(trace: &Trace) -> Summary {
@@ -62,6 +71,8 @@ pub fn summarize(trace: &Trace) -> Summary {
         .count();
     let ipc = (cycle_count > 0).then_some(retired_count as f64 / cycle_count as f64);
 
+    let bottlenecks = bottlenecks(trace);
+
     Summary {
         cycle_start,
         cycle_end,
@@ -73,10 +84,13 @@ pub fn summarize(trace: &Trace) -> Summary {
         lane_count: trace.lanes.len(),
         ipc,
         stall_reasons: stall_reasons(trace),
-        bottlenecks: bottlenecks(trace),
+        top_bottlenecks: top_counts(&bottlenecks, 8),
+        bottlenecks,
         status_counts: status_counts(trace),
         stage_occupancy: stage_occupancy(trace),
         retired_latency: retired_latency(trace),
+        flush_reasons: lane_and_event_reasons(trace, "flush"),
+        replay_reasons: lane_and_event_reasons(trace, "replay"),
     }
 }
 
@@ -133,6 +147,44 @@ fn status_counts(trace: &Trace) -> BTreeMap<String, u64> {
     }
 
     counts
+}
+
+fn lane_and_event_reasons(trace: &Trace, kind: &str) -> BTreeMap<String, u64> {
+    let mut counts = BTreeMap::new();
+
+    for span in &trace.spans {
+        if span.lane == kind {
+            let reason = attr_value(&span.attrs, "reason").unwrap_or("unknown");
+            *counts.entry(reason.to_owned()).or_insert(0) += span.duration;
+        }
+    }
+
+    for event in &trace.events {
+        if event.event == kind {
+            let reason = attr_value(&event.attrs, "reason").unwrap_or("unknown");
+            *counts.entry(reason.to_owned()).or_insert(0) += 1;
+        }
+    }
+
+    counts
+}
+
+fn top_counts(counts: &BTreeMap<String, u64>, limit: usize) -> Vec<CountEntry> {
+    let mut entries = counts
+        .iter()
+        .map(|(key, count)| CountEntry {
+            key: key.clone(),
+            count: *count,
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| {
+        right
+            .count
+            .cmp(&left.count)
+            .then_with(|| left.key.cmp(&right.key))
+    });
+    entries.truncate(limit);
+    entries
 }
 
 fn stage_occupancy(trace: &Trace) -> BTreeMap<String, u64> {
@@ -227,6 +279,8 @@ mod tests {
         assert_eq!(summary.stall_reasons["load_use"], 3);
         assert_eq!(summary.bottlenecks["stall:load_use"], 2);
         assert_eq!(summary.bottlenecks["event:stall:load_use"], 1);
+        assert_eq!(summary.top_bottlenecks[0].key, "stall:load_use");
+        assert_eq!(summary.top_bottlenecks[0].count, 2);
         assert_eq!(summary.status_counts["retire"], 1);
         assert_eq!(summary.status_counts["flush"], 1);
         assert_eq!(summary.stage_occupancy["IF"], 2);

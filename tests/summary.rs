@@ -55,6 +55,10 @@ fn summary_counts_cycles_ipc_statuses_and_bottlenecks() {
         1
     );
     assert_eq!(summary.bottlenecks["event:flush:branch_mispredict"], 1);
+    assert_eq!(summary.top_bottlenecks[0].key, "stall:dcache_miss");
+    assert_eq!(summary.top_bottlenecks[0].count, 3);
+    assert_eq!(summary.flush_reasons["branch_mispredict"], 3);
+    assert_eq!(summary.replay_reasons["memory_order_violation"], 3);
     assert_eq!(summary.status_counts["retire"], 2);
     assert_eq!(summary.status_counts["flush"], 1);
     assert_eq!(summary.stage_occupancy["FE"], 3);
