@@ -1,0 +1,16 @@
+{
+  "stages": {
+    "IF": { "bg": "#ff8800", "fg": "white", "alpha": 1.0 },
+    "ID": { "bg": "cyan", "fg": "black", "alpha": 1.0 },
+    "EX": { "fg": "light_green", "alpha": 0.0 },
+    "LS": "magenta",
+    "WB": { "bg": "blue", "fg": "white" },
+    "FE": { "bg": "#2563eb", "fg": "white" },
+    "RN": { "bg": "#16a34a", "fg": "white" },
+    "DIS": { "bg": "#ca8a04", "fg": "black" },
+    "IQ": { "bg": "#9333ea", "fg": "white" },
+    "LSQ": { "bg": "#dc2626", "fg": "white" },
+    "ROB": { "bg": "#0891b2", "fg": "white" },
+    "COM": { "bg": "#475569", "fg": "white" }
+  }
+}

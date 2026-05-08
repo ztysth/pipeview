@@ -6,13 +6,21 @@ use clap::{Parser, Subcommand};
 
 use crate::analysis::{Summary, summarize};
 use crate::parser::parse_plog;
-use crate::tui;
+use crate::tui::{self, ColorMode, Theme};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "Visualize configurable CPU and RTL pipeline logs")]
 pub struct Args {
     /// Open a PLog file in the terminal timeline view.
     path: Option<PathBuf>,
+
+    /// Disable stage colors in the terminal timeline view.
+    #[arg(long)]
+    no_color: bool,
+
+    /// Load a JSON stage color theme for the terminal timeline view.
+    #[arg(long, value_name = "PATH")]
+    theme: Option<PathBuf>,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -41,7 +49,8 @@ pub fn run() -> Result<()> {
         }
         (None, Some(path)) => {
             let trace = load_trace(&path)?;
-            tui::run(&path, trace)?;
+            let theme = load_theme(args.theme.as_deref(), args.no_color)?;
+            tui::run(&path, trace, theme)?;
         }
         (None, None) => {
             Args::parse_from(["pipeview", "--help"]);
@@ -61,6 +70,20 @@ fn load_trace(path: &Path) -> Result<crate::model::Trace> {
     let input =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
     parse_plog(&input).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn load_theme(path: Option<&Path>, no_color: bool) -> Result<Theme> {
+    if no_color {
+        return Ok(Theme::new(ColorMode::None));
+    }
+
+    let Some(path) = path else {
+        return Ok(Theme::new(ColorMode::Default));
+    };
+
+    let input =
+        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    Theme::from_json_str(&input).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 fn print_report(path: &Path, summary: &Summary) {
