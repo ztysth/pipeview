@@ -1,5 +1,7 @@
 use pipeview::parser::parse_plog;
-use pipeview::tui::{ColorMode, Theme, build_timeline_rows, timeline_runs};
+use pipeview::tui::{
+    ColorMode, Theme, build_timeline_rows, parse_jump_target, timeline_runs, visible_cycle_count,
+};
 use ratatui::style::{Color, Style};
 
 const THEME_JSON: &str = include_str!("../examples/theme.json");
@@ -58,6 +60,23 @@ fn timeline_runs_merge_adjacent_matching_cells() {
     assert_eq!(runs[1].cell.as_ref().expect("stall run").label, "ID/stall");
     assert_eq!(runs[2].width, 1);
     assert_eq!(runs[2].cell.as_ref().expect("EX run").label, "EX");
+}
+
+#[test]
+fn jump_target_parses_row_and_absolute_cycle() {
+    assert_eq!(parse_jump_target("12,345"), Some((12, 345)));
+    assert_eq!(parse_jump_target("12:345"), Some((12, 345)));
+    assert_eq!(parse_jump_target("12 345"), Some((12, 345)));
+    assert_eq!(parse_jump_target("0,345"), None);
+    assert_eq!(parse_jump_target("12"), None);
+    assert_eq!(parse_jump_target("12,345,6"), None);
+}
+
+#[test]
+fn visible_cycle_count_tracks_zoom_cell_width() {
+    assert_eq!(visible_cycle_count(80, 5), 12);
+    assert_eq!(visible_cycle_count(80, 10), 6);
+    assert_eq!(visible_cycle_count(10, 10), 1);
 }
 
 #[test]

@@ -4,7 +4,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use crossterm::event::{self, Event, KeyCode};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -14,13 +14,18 @@ use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use serde::Deserialize;
 
 use crate::analysis::{Summary, summarize};
 use crate::model::{Instruction, KeyValue, Stage, Trace};
 
-const DEFAULT_CYCLE_WIDTH: u64 = 24;
+mod keys;
+pub use keys::parse_jump_target;
+
+const DEFAULT_CELL_WIDTH: u16 = 5;
+const MIN_CELL_WIDTH: u16 = 2;
+const MAX_CELL_WIDTH: u16 = 18;
 const DEFAULT_STAGE_COLORS: [Color; 12] = [
     Color::Rgb(0x0f, 0x76, 0x68),
     Color::Rgb(0x1d, 0x4e, 0x89),
@@ -37,12 +42,16 @@ const DEFAULT_STAGE_COLORS: [Color; 12] = [
 ];
 
 #[derive(Debug)]
-struct App {
+pub(super) struct App {
     file_name: String,
     summary: Summary,
     rows: Vec<TimelineRow>,
-    selected_row: usize,
-    cycle_offset: u64,
+    pub(super) selected_row: usize,
+    pub(super) cycle_offset: u64,
+    pub(super) cell_width: u16,
+    pub(super) overlay: Overlay,
+    pub(super) jump_input: String,
+    pub(super) status: String,
     theme: Theme,
 }
 
@@ -65,6 +74,14 @@ pub struct TimelineRun {
     pub offset: u64,
     pub width: u64,
     pub cell: Option<TimelineCell>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Overlay {
+    None,
+    Info,
+    Help,
+    Jump,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -180,30 +197,92 @@ impl App {
             rows: build_timeline_rows(&trace),
             selected_row: 0,
             cycle_offset,
+            cell_width: DEFAULT_CELL_WIDTH,
+            overlay: Overlay::None,
+            jump_input: String::new(),
+            status: "?: help  i: info  g: jump  Esc: close panel/quit  Ctrl +/-: zoom  q: quit"
+                .to_owned(),
             theme,
         }
     }
 
-    fn selected_row(&self) -> Option<&TimelineRow> {
+    pub(super) fn selected_row(&self) -> Option<&TimelineRow> {
         self.rows.get(self.selected_row)
     }
 
-    fn move_up(&mut self) {
+    pub(super) fn move_up(&mut self) {
         self.selected_row = self.selected_row.saturating_sub(1);
     }
 
-    fn move_down(&mut self) {
+    pub(super) fn move_down(&mut self) {
         if self.selected_row + 1 < self.rows.len() {
             self.selected_row += 1;
         }
     }
 
-    fn move_left(&mut self) {
+    pub(super) fn move_left(&mut self) {
         self.cycle_offset = self.cycle_offset.saturating_sub(1);
     }
 
-    fn move_right(&mut self) {
+    pub(super) fn move_right(&mut self) {
         self.cycle_offset = self.cycle_offset.saturating_add(1);
+    }
+
+    pub(super) fn jump_to_row_last_cycle(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        if let Some(last_cycle) = row.cells.keys().next_back().copied() {
+            self.cycle_offset = last_cycle;
+            self.status = format!(
+                "jumped to last cycle {last_cycle} for row {}",
+                self.selected_row + 1
+            );
+        }
+    }
+
+    pub(super) fn zoom_in(&mut self) {
+        if self.cell_width < MAX_CELL_WIDTH {
+            self.cell_width += 1;
+        }
+        self.status = format!("zoom: {} columns/cycle", self.cell_width);
+    }
+
+    pub(super) fn zoom_out(&mut self) {
+        if self.cell_width > MIN_CELL_WIDTH {
+            self.cell_width -= 1;
+        }
+        self.status = format!("zoom: {} columns/cycle", self.cell_width);
+    }
+
+    pub(super) fn begin_jump(&mut self) {
+        self.overlay = Overlay::Jump;
+        self.jump_input.clear();
+        self.status = "jump: enter row,cycle then Enter; Esc cancels".to_owned();
+    }
+
+    pub(super) fn push_jump_char(&mut self, ch: char) {
+        if ch.is_ascii_digit() || matches!(ch, ',' | ':' | ' ') {
+            self.jump_input.push(ch);
+        }
+    }
+
+    pub(super) fn pop_jump_char(&mut self) {
+        self.jump_input.pop();
+    }
+
+    pub(super) fn apply_jump(&mut self) {
+        match parse_jump_target(&self.jump_input) {
+            Some((row, cycle)) => {
+                self.selected_row = row.saturating_sub(1).min(self.rows.len().saturating_sub(1));
+                self.cycle_offset = cycle;
+                self.overlay = Overlay::None;
+                self.status = format!("jumped to row {} cycle {}", self.selected_row + 1, cycle);
+            }
+            None => {
+                self.status = "invalid jump target; use row,cycle".to_owned();
+            }
+        }
     }
 }
 
@@ -219,17 +298,8 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
     loop {
         terminal.draw(|frame| render(frame, app))?;
 
-        if event::poll(Duration::from_millis(100))?
-            && let Event::Key(key) = event::read()?
-        {
-            match key.code {
-                KeyCode::Char('q') | KeyCode::Esc => break,
-                KeyCode::Up => app.move_up(),
-                KeyCode::Down => app.move_down(),
-                KeyCode::Left => app.move_left(),
-                KeyCode::Right => app.move_right(),
-                _ => {}
-            }
+        if event::poll(Duration::from_millis(100))? && !keys::handle_event(app, event::read()?) {
+            break;
         }
     }
 
@@ -243,13 +313,14 @@ fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
         .constraints([
             Constraint::Length(3),
             Constraint::Min(8),
-            Constraint::Length(5),
+            Constraint::Length(1),
         ])
         .split(area);
 
     render_header(frame, vertical[0], app);
     render_timeline(frame, vertical[1], app);
-    render_details(frame, vertical[2], app);
+    render_status(frame, vertical[2], app);
+    render_overlay(frame, area, app);
 }
 
 fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
@@ -270,11 +341,15 @@ fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
 }
 
 fn render_timeline(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let visible_cycles = visible_cycle_count(area.width);
+    let visible_cycles = visible_cycle_count(area.width, app.cell_width);
     let row_limit = area.height.saturating_sub(3) as usize;
     let start = app.selected_row.saturating_sub(row_limit.saturating_sub(1));
     let mut lines = Vec::with_capacity(row_limit + 1);
-    lines.push(timeline_header(app.cycle_offset, visible_cycles));
+    lines.push(timeline_header(
+        app.cycle_offset,
+        visible_cycles,
+        app.cell_width,
+    ));
     lines.extend(
         app.rows
             .iter()
@@ -286,6 +361,7 @@ fn render_timeline(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
                     row,
                     app.cycle_offset,
                     visible_cycles,
+                    app.cell_width,
                     index == app.selected_row,
                     &app.theme,
                 )
@@ -297,7 +373,7 @@ fn render_timeline(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     frame.render_widget(timeline, area);
 }
 
-fn timeline_header(cycle_offset: u64, visible_cycles: u64) -> Line<'static> {
+fn timeline_header(cycle_offset: u64, visible_cycles: u64, cell_width: u16) -> Line<'static> {
     let mut spans = Vec::with_capacity(visible_cycles as usize + 1);
     spans.push(Span::styled(
         fit_left("inst", 18),
@@ -307,7 +383,7 @@ fn timeline_header(cycle_offset: u64, visible_cycles: u64) -> Line<'static> {
     ));
     spans.extend((0..visible_cycles).map(|offset| {
         Span::styled(
-            fit_center(&(cycle_offset + offset).to_string(), 5),
+            fit_center(&(cycle_offset + offset).to_string(), cell_width as usize),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
@@ -320,6 +396,7 @@ fn timeline_row(
     row: &TimelineRow,
     cycle_offset: u64,
     visible_cycles: u64,
+    cell_width: u16,
     selected: bool,
     theme: &Theme,
 ) -> Line<'static> {
@@ -329,7 +406,13 @@ fn timeline_row(
         Style::default()
     };
     let mut spans = vec![Span::styled(fit_left(&row.label, 18), label_style)];
-    spans.extend(timeline_run_spans(row, cycle_offset, visible_cycles, theme));
+    spans.extend(timeline_run_spans(
+        row,
+        cycle_offset,
+        visible_cycles,
+        cell_width,
+        theme,
+    ));
     Line::from(spans)
 }
 
@@ -337,12 +420,13 @@ fn timeline_run_spans(
     row: &TimelineRow,
     cycle_offset: u64,
     visible_cycles: u64,
+    cell_width: u16,
     theme: &Theme,
 ) -> Vec<Span<'static>> {
     timeline_runs(row, cycle_offset, visible_cycles)
         .into_iter()
         .map(|run| {
-            let span_width = (run.width * 5) as usize;
+            let span_width = (run.width * u64::from(cell_width)) as usize;
             match run.cell {
                 Some(cell) => Span::styled(
                     fit_center(&cell.label, span_width),
@@ -409,42 +493,133 @@ fn truncate_chars(value: &str, width: usize) -> String {
     value.chars().take(width).collect()
 }
 
-fn render_details(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    let text = match app.overlay {
+        Overlay::Jump => format!("jump row,cycle: {}", app.jump_input),
+        _ => app.status.clone(),
+    };
+    frame.render_widget(Paragraph::new(text), area);
+}
+
+fn render_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    match app.overlay {
+        Overlay::None => {}
+        Overlay::Info => render_info_overlay(frame, centered_rect(area, 76, 14), app),
+        Overlay::Help => render_help_overlay(frame, centered_rect(area, 76, 12)),
+        Overlay::Jump => render_jump_overlay(frame, centered_rect(area, 58, 5), app),
+    }
+}
+
+fn render_info_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    frame.render_widget(Clear, area);
     let selected = app
         .selected_row()
         .map(|row| format!("selected: {}", row.label))
         .unwrap_or_else(|| "selected: none".to_owned());
-    let stall = if app.summary.stall_reasons.is_empty() {
-        "stalls: none".to_owned()
-    } else {
-        let reasons = app
-            .summary
-            .stall_reasons
-            .iter()
-            .map(|(reason, count)| format!("{reason}={count}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        format!("stalls: {reasons}")
-    };
     let lines = vec![
-        Line::from(vec![
-            Span::styled("q", Style::default().fg(Color::Yellow)),
-            Span::raw("/Esc quit  "),
-            Span::styled("arrows", Style::default().fg(Color::Yellow)),
-            Span::raw(" navigate"),
-        ]),
         Line::from(selected),
-        Line::from(stall),
+        Line::from(format!(
+            "row: {} / {}    cycle offset: {}    zoom: {}",
+            app.selected_row + 1,
+            app.rows.len(),
+            app.cycle_offset,
+            app.cell_width
+        )),
+        Line::from(format!(
+            "instructions: {}  retired: {}  spans: {}  IPC: {}",
+            app.summary.instruction_count,
+            app.summary.retired_count,
+            app.summary.span_count,
+            app.summary
+                .ipc
+                .map_or_else(|| "n/a".to_owned(), |ipc| format!("{ipc:.3}"))
+        )),
+        Line::from(format_count_entries("top", &app.summary.top_bottlenecks)),
+        Line::from(format_map_counts("stalls", &app.summary.stall_reasons)),
+        Line::from(format_map_counts("flush", &app.summary.flush_reasons)),
+        Line::from(format_map_counts("replay", &app.summary.replay_reasons)),
     ];
-    let details =
-        Paragraph::new(lines).block(Block::default().title("Details").borders(Borders::ALL));
-    frame.render_widget(details, area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(Color::Black).fg(Color::White))
+            .block(Block::default().title("Info").borders(Borders::ALL)),
+        area,
+    );
 }
 
-fn visible_cycle_count(width: u16) -> u64 {
+fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect) {
+    frame.render_widget(Clear, area);
+    let lines = vec![
+        Line::from("Esc close panel    q quit    arrows navigate"),
+        Line::from("End jump to selected row last block"),
+        Line::from("g jump to row,cycle    i toggle info    ? toggle help"),
+        Line::from("Ctrl + / Ctrl = zoom in    Ctrl - zoom out"),
+        Line::from("Ctrl + mouse wheel zooms when the terminal reports wheel modifiers"),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(Color::Black).fg(Color::White))
+            .block(Block::default().title("Keys").borders(Borders::ALL)),
+        area,
+    );
+}
+
+fn render_jump_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    frame.render_widget(Clear, area);
+    let lines = vec![
+        Line::from("Enter row,cycle, e.g. 120,450. Esc closes this panel."),
+        Line::from(format!("> {}", app.jump_input)),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(Color::Black).fg(Color::White))
+            .block(Block::default().title("Jump").borders(Borders::ALL)),
+        area,
+    );
+}
+
+fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    }
+}
+
+pub fn visible_cycle_count(width: u16, cell_width: u16) -> u64 {
     let usable = width.saturating_sub(20);
-    let count = (usable / 5).max(1) as u64;
-    count.min(DEFAULT_CYCLE_WIDTH)
+    (usable / cell_width.max(1)).max(1) as u64
+}
+
+fn format_count_entries(label: &str, counts: &[crate::analysis::CountEntry]) -> String {
+    if counts.is_empty() {
+        return format!("{label}: none");
+    }
+
+    let values = counts
+        .iter()
+        .take(4)
+        .map(|entry| format!("{}={}", entry.key, entry.count))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{label}: {values}")
+}
+
+fn format_map_counts(label: &str, counts: &BTreeMap<String, u64>) -> String {
+    if counts.is_empty() {
+        return format!("{label}: none");
+    }
+
+    let values = counts
+        .iter()
+        .take(4)
+        .map(|(key, count)| format!("{key}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{label}: {values}")
 }
 
 pub fn build_timeline_rows(trace: &Trace) -> Vec<TimelineRow> {
@@ -591,7 +766,7 @@ impl TerminalSession {
     fn start() -> Result<Self> {
         enable_raw_mode()?;
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen)?;
+        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend)?;
         Ok(Self {
@@ -607,7 +782,11 @@ impl TerminalSession {
     fn restore(&mut self) -> Result<()> {
         if !self.restored {
             disable_raw_mode()?;
-            execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+            execute!(
+                self.terminal.backend_mut(),
+                DisableMouseCapture,
+                LeaveAlternateScreen
+            )?;
             self.terminal.show_cursor()?;
             self.restored = true;
         }
