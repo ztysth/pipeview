@@ -45,13 +45,11 @@ pub(super) fn handle_event(app: &mut App, event: Event) -> bool {
                 app.jump_to_row_last_cycle();
                 true
             }
-            KeyCode::Char('+') | KeyCode::Char('=')
-                if key.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Char('+') | KeyCode::Char('=') => {
                 app.zoom_in();
                 true
             }
-            KeyCode::Char('-') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            KeyCode::Char('-') => {
                 app.zoom_out();
                 true
             }
@@ -71,6 +69,14 @@ pub(super) fn handle_event(app: &mut App, event: Event) -> bool {
                 };
                 true
             }
+            KeyCode::Char('d') => {
+                app.overlay = if app.overlay == Overlay::Detail {
+                    Overlay::None
+                } else {
+                    Overlay::Detail
+                };
+                true
+            }
             KeyCode::Char('g') => {
                 app.begin_jump();
                 true
@@ -81,6 +87,14 @@ pub(super) fn handle_event(app: &mut App, event: Event) -> bool {
             match mouse.kind {
                 MouseEventKind::ScrollUp => app.zoom_in(),
                 MouseEventKind::ScrollDown => app.zoom_out(),
+                _ => {}
+            }
+            true
+        }
+        Event::Mouse(mouse) => {
+            match mouse.kind {
+                MouseEventKind::ScrollUp => app.move_left(),
+                MouseEventKind::ScrollDown => app.move_right(),
                 _ => {}
             }
             true

@@ -1,6 +1,7 @@
 use pipeview::parser::parse_plog;
 use pipeview::tui::{
-    ColorMode, Theme, build_timeline_rows, parse_jump_target, timeline_runs, visible_cycle_count,
+    ColorMode, Theme, build_instruction_details, build_timeline_rows, parse_jump_target,
+    timeline_runs, visible_cycle_count,
 };
 use ratatui::style::{Color, Style};
 
@@ -77,6 +78,42 @@ fn visible_cycle_count_tracks_zoom_cell_width() {
     assert_eq!(visible_cycle_count(80, 5), 12);
     assert_eq!(visible_cycle_count(80, 10), 6);
     assert_eq!(visible_cycle_count(10, 10), 1);
+}
+
+#[test]
+fn instruction_details_include_attrs_spans_events_and_retire_status() {
+    let trace = parse_plog(concat!(
+        "PLOG\t1\n",
+        "STAGE\tIF\tFetch\n",
+        "STAGE\tID\tDecode\n",
+        "LANE\tmain\tMain\n",
+        "LANE\tstall\tStall\n",
+        "I\t7\tpc=0x80000020\tasm=lw\top=load\n",
+        "B\t9\t1\t7\tmain\tIF\n",
+        "B\t11\t2\t7\tstall\tID\treason=load_use\tresource=rs1\n",
+        "E\t12\t7\tstall\treason=load_use\n",
+        "R\t14\t7\tretire\tcommit=0\n",
+    ))
+    .expect("valid trace");
+
+    let details = build_instruction_details(&trace);
+    let detail = details.get(&7).expect("instruction detail");
+
+    assert_eq!(detail.label, "#7 0x80000020 lw");
+    assert_eq!(detail.attrs.len(), 3);
+    assert_eq!(detail.spans.len(), 2);
+    assert_eq!(detail.spans[0].cycle, 9);
+    assert_eq!(detail.spans[0].stage, "IF");
+    assert_eq!(detail.spans[1].cycle, 11);
+    assert_eq!(detail.spans[1].duration, 2);
+    assert_eq!(detail.spans[1].lane, "stall");
+    assert_eq!(detail.spans[1].attrs[0].key, "reason");
+    assert_eq!(detail.events.len(), 1);
+    assert_eq!(detail.events[0].event, "stall");
+    assert_eq!(
+        detail.retire.as_ref().expect("retire detail").status,
+        "retire"
+    );
 }
 
 #[test]

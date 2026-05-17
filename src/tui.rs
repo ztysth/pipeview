@@ -18,14 +18,13 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use serde::Deserialize;
 
 use crate::analysis::{Summary, summarize};
-use crate::model::{Instruction, KeyValue, Stage, Trace};
+use crate::model::{Instruction, KeyValue, RetireEvent, Span as ModelSpan, Stage, Trace};
 
 mod keys;
 pub use keys::parse_jump_target;
 
 const DEFAULT_CELL_WIDTH: u16 = 5;
-const MIN_CELL_WIDTH: u16 = 2;
-const MAX_CELL_WIDTH: u16 = 18;
+const MIN_CELL_WIDTH: u16 = 1;
 const DEFAULT_STAGE_COLORS: [Color; 12] = [
     Color::Rgb(0x0f, 0x76, 0x68),
     Color::Rgb(0x1d, 0x4e, 0x89),
@@ -53,6 +52,7 @@ pub(super) struct App {
     pub(super) jump_input: String,
     pub(super) status: String,
     theme: Theme,
+    details: BTreeMap<u64, InstructionDetail>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,8 +80,42 @@ pub struct TimelineRun {
 pub(super) enum Overlay {
     None,
     Info,
+    Detail,
     Help,
     Jump,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstructionDetail {
+    pub inst_id: u64,
+    pub label: String,
+    pub attrs: Vec<KeyValue>,
+    pub spans: Vec<SpanDetail>,
+    pub events: Vec<EventDetail>,
+    pub retire: Option<RetireDetail>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanDetail {
+    pub cycle: u64,
+    pub duration: u64,
+    pub stage: String,
+    pub lane: String,
+    pub attrs: Vec<KeyValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventDetail {
+    pub cycle: u64,
+    pub event: String,
+    pub attrs: Vec<KeyValue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetireDetail {
+    pub cycle: u64,
+    pub status: String,
+    pub attrs: Vec<KeyValue>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -200,14 +234,21 @@ impl App {
             cell_width: DEFAULT_CELL_WIDTH,
             overlay: Overlay::None,
             jump_input: String::new(),
-            status: "?: help  i: info  g: jump  Esc: close panel/quit  Ctrl +/-: zoom  q: quit"
-                .to_owned(),
+            status:
+                "?: help  i: info  d: detail  g: jump  Esc: close panel/quit  +/-: zoom  q: quit"
+                    .to_owned(),
             theme,
+            details: build_instruction_details(&trace),
         }
     }
 
     pub(super) fn selected_row(&self) -> Option<&TimelineRow> {
         self.rows.get(self.selected_row)
+    }
+
+    pub(super) fn selected_detail(&self) -> Option<&InstructionDetail> {
+        self.selected_row()
+            .and_then(|row| self.details.get(&row.inst_id))
     }
 
     pub(super) fn move_up(&mut self) {
@@ -242,9 +283,7 @@ impl App {
     }
 
     pub(super) fn zoom_in(&mut self) {
-        if self.cell_width < MAX_CELL_WIDTH {
-            self.cell_width += 1;
-        }
+        self.cell_width = self.cell_width.saturating_add(1);
         self.status = format!("zoom: {} columns/cycle", self.cell_width);
     }
 
@@ -505,6 +544,7 @@ fn render_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     match app.overlay {
         Overlay::None => {}
         Overlay::Info => render_info_overlay(frame, centered_rect(area, 76, 14), app),
+        Overlay::Detail => render_detail_overlay(frame, centered_rect(area, 90, 18), app),
         Overlay::Help => render_help_overlay(frame, centered_rect(area, 76, 12)),
         Overlay::Jump => render_jump_overlay(frame, centered_rect(area, 58, 5), app),
     }
@@ -547,14 +587,86 @@ fn render_info_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+fn render_detail_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
+    frame.render_widget(Clear, area);
+    let lines = app
+        .selected_detail()
+        .map(detail_lines)
+        .unwrap_or_else(|| vec![Line::from("selected: none")]);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .style(Style::default().bg(Color::Black).fg(Color::White))
+            .block(Block::default().title("Detail").borders(Borders::ALL)),
+        area,
+    );
+}
+
+fn detail_lines(detail: &InstructionDetail) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(format!("instruction: {}", detail.label)),
+        Line::from(format_attrs("attrs", &detail.attrs)),
+    ];
+
+    match &detail.retire {
+        Some(retire) => lines.push(Line::from(format!(
+            "retire: cycle={} status={} {}",
+            retire.cycle,
+            retire.status,
+            format_attrs("attrs", &retire.attrs)
+        ))),
+        None => lines.push(Line::from("retire: none")),
+    }
+
+    lines.push(Line::from("spans:"));
+    if detail.spans.is_empty() {
+        lines.push(Line::from("  none"));
+    } else {
+        lines.extend(detail.spans.iter().take(8).map(|span| {
+            Line::from(format!(
+                "  cycle={} duration={} stage={} lane={} {}",
+                span.cycle,
+                span.duration,
+                span.stage,
+                span.lane,
+                format_attrs("attrs", &span.attrs)
+            ))
+        }));
+        if detail.spans.len() > 8 {
+            lines.push(Line::from(format!("  ... {} more", detail.spans.len() - 8)));
+        }
+    }
+
+    lines.push(Line::from("events:"));
+    if detail.events.is_empty() {
+        lines.push(Line::from("  none"));
+    } else {
+        lines.extend(detail.events.iter().take(4).map(|event| {
+            Line::from(format!(
+                "  cycle={} event={} {}",
+                event.cycle,
+                event.event,
+                format_attrs("attrs", &event.attrs)
+            ))
+        }));
+        if detail.events.len() > 4 {
+            lines.push(Line::from(format!(
+                "  ... {} more",
+                detail.events.len() - 4
+            )));
+        }
+    }
+
+    lines
+}
+
 fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect) {
     frame.render_widget(Clear, area);
     let lines = vec![
         Line::from("Esc close panel    q quit    arrows navigate"),
         Line::from("End jump to selected row last block"),
-        Line::from("g jump to row,cycle    i toggle info    ? toggle help"),
-        Line::from("Ctrl + / Ctrl = zoom in    Ctrl - zoom out"),
-        Line::from("Ctrl + mouse wheel zooms when the terminal reports wheel modifiers"),
+        Line::from("g jump to row,cycle    i toggle info    d toggle detail    ? toggle help"),
+        Line::from("+ / = zoom in    - zoom out"),
+        Line::from("mouse wheel moves cycles    Ctrl + mouse wheel zooms when supported"),
     ];
     frame.render_widget(
         Paragraph::new(lines)
@@ -622,6 +734,24 @@ fn format_map_counts(label: &str, counts: &BTreeMap<String, u64>) -> String {
     format!("{label}: {values}")
 }
 
+fn format_attrs(label: &str, attrs: &[KeyValue]) -> String {
+    if attrs.is_empty() {
+        return format!("{label}: none");
+    }
+
+    let values = attrs
+        .iter()
+        .take(6)
+        .map(|attr| format!("{}={}", attr.key, attr.value))
+        .collect::<Vec<_>>()
+        .join(" ");
+    if attrs.len() > 6 {
+        format!("{label}: {values} ...")
+    } else {
+        format!("{label}: {values}")
+    }
+}
+
 pub fn build_timeline_rows(trace: &Trace) -> Vec<TimelineRow> {
     let instruction_labels = trace
         .instructions
@@ -661,6 +791,75 @@ pub fn build_timeline_rows(trace: &Trace) -> Vec<TimelineRow> {
     rows.sort_by_key(|row| row.inst_id);
     row_indexes.clear();
     rows
+}
+
+pub fn build_instruction_details(trace: &Trace) -> BTreeMap<u64, InstructionDetail> {
+    let mut details = trace
+        .instructions
+        .iter()
+        .map(|instruction| {
+            (
+                instruction.inst_id,
+                InstructionDetail {
+                    inst_id: instruction.inst_id,
+                    label: instruction_label(instruction),
+                    attrs: instruction.attrs.clone(),
+                    spans: Vec::new(),
+                    events: Vec::new(),
+                    retire: None,
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    for span in &trace.spans {
+        if let Some(detail) = details.get_mut(&span.inst_id) {
+            detail.spans.push(span_detail(span));
+        }
+    }
+
+    for event in &trace.events {
+        if let Some(detail) = details.get_mut(&event.inst_id) {
+            detail.events.push(EventDetail {
+                cycle: event.cycle,
+                event: event.event.clone(),
+                attrs: event.attrs.clone(),
+            });
+        }
+    }
+
+    for retire in &trace.retires {
+        if let Some(detail) = details.get_mut(&retire.inst_id) {
+            detail.retire = Some(retire_detail(retire));
+        }
+    }
+
+    for detail in details.values_mut() {
+        detail
+            .spans
+            .sort_by_key(|span| (span.cycle, span.stage.clone(), span.lane.clone()));
+        detail.events.sort_by_key(|event| event.cycle);
+    }
+
+    details
+}
+
+fn span_detail(span: &ModelSpan) -> SpanDetail {
+    SpanDetail {
+        cycle: span.cycle,
+        duration: span.duration,
+        stage: span.stage.clone(),
+        lane: span.lane.clone(),
+        attrs: span.attrs.clone(),
+    }
+}
+
+fn retire_detail(retire: &RetireEvent) -> RetireDetail {
+    RetireDetail {
+        cycle: retire.cycle,
+        status: retire.status.clone(),
+        attrs: retire.attrs.clone(),
+    }
 }
 
 fn instruction_label(instruction: &Instruction) -> String {
