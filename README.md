@@ -78,9 +78,11 @@ cargo run -- --no-color examples/classic_5stage_bottleneck.plog
 | `End` | Jump to the last occupied cycle in the selected row |
 | `g` | Open jump input; enter `row,cycle` |
 | `i` | Toggle the information panel |
+| `d` | Toggle the selected instruction detail panel |
 | `?` | Toggle the key help panel |
-| `Ctrl +` / `Ctrl =` | Zoom in |
-| `Ctrl -` | Zoom out |
+| `+` / `=` | Zoom in |
+| `-` | Zoom out |
+| `Mouse wheel` | Move the cycle window |
 | `Ctrl + mouse wheel` | Zoom when supported by the terminal |
 
 | 快捷键 | 功能 |
@@ -92,9 +94,11 @@ cargo run -- --no-color examples/classic_5stage_bottleneck.plog
 | `End` | 跳转到当前行最后一个有信息的 cycle |
 | `g` | 打开跳转输入; 输入 `row,cycle` |
 | `i` | 显示或隐藏信息面板 |
+| `d` | 显示或隐藏当前选中指令详情面板 |
 | `?` | 显示或隐藏快捷键帮助面板 |
-| `Ctrl +` / `Ctrl =` | 放大 |
-| `Ctrl -` | 缩小 |
+| `+` / `=` | 放大 |
+| `-` | 缩小 |
+| `鼠标滚轮` | 移动 cycle 窗口 |
 | `Ctrl + 鼠标滚轮` | 在终端支持时缩放 |
 
 ## License
