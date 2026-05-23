@@ -65,6 +65,19 @@ fn summary_counts_cycles_ipc_statuses_and_bottlenecks() {
     assert_eq!(summary.stage_occupancy["EX"], 4);
     assert_eq!(summary.stage_occupancy["MEM"], 3);
     assert_eq!(summary.stage_occupancy["COM"], 2);
+    assert_eq!(summary.stage_stats["FE"].span_count, 3);
+    assert_eq!(summary.stage_stats["FE"].total_cycles, 3);
+    assert_eq!(summary.stage_stats["FE"].max_duration, 1);
+    assert_eq!(summary.stage_stats["EX"].span_count, 2);
+    assert_eq!(summary.stage_stats["EX"].total_cycles, 4);
+    assert_eq!(summary.stage_stats["EX"].average_duration, 2.0);
+    assert_eq!(summary.stage_stats["EX"].max_duration, 2);
+    assert_eq!(summary.lane_stats["main"].span_count, 5);
+    assert_eq!(summary.lane_stats["main"].total_cycles, 5);
+    assert_eq!(summary.lane_stats["stall"].span_count, 1);
+    assert_eq!(summary.lane_stats["stall"].total_cycles, 3);
+    assert_eq!(summary.lane_stats["stall"].average_duration, 3.0);
+    assert_eq!(summary.lane_stats["replay"].max_duration, 2);
 
     let latency = summary.retired_latency.expect("retired latency");
     assert_eq!(latency.count, 2);

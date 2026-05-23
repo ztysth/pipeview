@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
-use crate::analysis::{Summary, summarize};
+use crate::analysis::{SpanStats, Summary, summarize};
 use crate::parser::parse_plog;
 use crate::tui::{self, ColorMode, Theme};
 
@@ -175,6 +175,9 @@ fn print_report(path: &Path, summary: &Summary) {
         }
     }
 
+    print_span_stats("stage_stats", &summary.stage_stats);
+    print_span_stats("lane_stats", &summary.lane_stats);
+
     match &summary.retired_latency {
         Some(latency) => {
             println!("retired_latency:");
@@ -184,5 +187,20 @@ fn print_report(path: &Path, summary: &Summary) {
             println!("  average: {:.3}", latency.average);
         }
         None => println!("retired_latency: none"),
+    }
+}
+
+fn print_span_stats(label: &str, stats: &std::collections::BTreeMap<String, SpanStats>) {
+    if stats.is_empty() {
+        println!("{label}: none");
+        return;
+    }
+
+    println!("{label}:");
+    for (key, stats) in stats {
+        println!(
+            "  {key}: total={} spans={} average={:.3} max={}",
+            stats.total_cycles, stats.span_count, stats.average_duration, stats.max_duration
+        );
     }
 }

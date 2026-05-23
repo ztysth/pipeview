@@ -69,6 +69,13 @@ cargo run -- --no-color examples/classic_5stage_bottleneck.plog
 
 ## Keys
 
+Arrow keys are the primary navigation controls: `Up` / `Down` move between
+instruction rows, and `Left` / `Right` move the visible cycle window. Mouse
+wheel shortcuts mirror those movements.
+
+方向键是主要的导航方式: `Up` / `Down` 在指令行之间移动, `Left` / `Right`
+移动可见 cycle 窗口. 鼠标滚轮快捷键对应这些移动方式.
+
 | Key | Action |
 | --- | --- |
 | `q` | Quit |

@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::model::{KeyValue, Trace};
+use crate::model::{KeyValue, Span, Trace};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Summary {
@@ -17,6 +17,8 @@ pub struct Summary {
     pub bottlenecks: BTreeMap<String, u64>,
     pub status_counts: BTreeMap<String, u64>,
     pub stage_occupancy: BTreeMap<String, u64>,
+    pub stage_stats: BTreeMap<String, SpanStats>,
+    pub lane_stats: BTreeMap<String, SpanStats>,
     pub retired_latency: Option<LatencyStats>,
     pub flush_reasons: BTreeMap<String, u64>,
     pub replay_reasons: BTreeMap<String, u64>,
@@ -29,6 +31,14 @@ pub struct LatencyStats {
     pub min: u64,
     pub max: u64,
     pub average: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SpanStats {
+    pub span_count: u64,
+    pub total_cycles: u64,
+    pub max_duration: u64,
+    pub average_duration: f64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +82,8 @@ pub fn summarize(trace: &Trace) -> Summary {
     let ipc = (cycle_count > 0).then_some(retired_count as f64 / cycle_count as f64);
 
     let bottlenecks = bottlenecks(trace);
+    let stage_stats = span_stats_by(trace, |span| span.stage.as_str());
+    let lane_stats = span_stats_by(trace, |span| span.lane.as_str());
 
     Summary {
         cycle_start,
@@ -88,6 +100,8 @@ pub fn summarize(trace: &Trace) -> Summary {
         bottlenecks,
         status_counts: status_counts(trace),
         stage_occupancy: stage_occupancy(trace),
+        stage_stats,
+        lane_stats,
         retired_latency: retired_latency(trace),
         flush_reasons: lane_and_event_reasons(trace, "flush"),
         replay_reasons: lane_and_event_reasons(trace, "replay"),
@@ -195,6 +209,49 @@ fn stage_occupancy(trace: &Trace) -> BTreeMap<String, u64> {
     }
 
     counts
+}
+
+fn span_stats_by<'a>(
+    trace: &'a Trace,
+    key_fn: impl Fn(&'a Span) -> &'a str,
+) -> BTreeMap<String, SpanStats> {
+    let mut accum = BTreeMap::<String, SpanStatsAccum>::new();
+
+    for span in &trace.spans {
+        accum
+            .entry(key_fn(span).to_owned())
+            .or_default()
+            .include(span.duration);
+    }
+
+    accum
+        .into_iter()
+        .map(|(key, stats)| (key, stats.finish()))
+        .collect()
+}
+
+#[derive(Debug, Default)]
+struct SpanStatsAccum {
+    span_count: u64,
+    total_cycles: u64,
+    max_duration: u64,
+}
+
+impl SpanStatsAccum {
+    fn include(&mut self, duration: u64) {
+        self.span_count += 1;
+        self.total_cycles += duration;
+        self.max_duration = self.max_duration.max(duration);
+    }
+
+    fn finish(self) -> SpanStats {
+        SpanStats {
+            span_count: self.span_count,
+            total_cycles: self.total_cycles,
+            max_duration: self.max_duration,
+            average_duration: self.total_cycles as f64 / self.span_count as f64,
+        }
+    }
 }
 
 fn retired_latency(trace: &Trace) -> Option<LatencyStats> {
