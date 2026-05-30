@@ -1,7 +1,7 @@
 use pipeview::parser::parse_plog;
 use pipeview::tui::{
     ColorMode, Theme, build_instruction_details, build_timeline_rows, parse_jump_target,
-    timeline_runs, visible_cycle_count,
+    timeline_cell_at, timeline_runs, visible_cycle_count,
 };
 use ratatui::style::{Color, Style};
 
@@ -26,13 +26,23 @@ fn timeline_rows_preserve_stage_and_lane_metadata() {
 
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].label, "#1 0x80000000 lw");
-    assert_eq!(rows[0].cells[&1].stage, "IF");
-    assert_eq!(rows[0].cells[&1].lane, "main");
-    assert_eq!(rows[0].cells[&1].label, "IF");
-    assert_eq!(rows[0].cells[&2].stage, "ID");
-    assert_eq!(rows[0].cells[&2].lane, "stall");
-    assert_eq!(rows[0].cells[&2].label, "ID/stall");
-    assert_eq!(rows[0].cells[&3].label, "ID/stall");
+    assert_eq!(rows[0].spans.len(), 2);
+    assert_eq!(rows[0].last_cycle, Some(3));
+
+    let cycle_1 = timeline_cell_at(&rows[0], 1).expect("cycle 1 cell");
+    assert_eq!(cycle_1.stage, "IF");
+    assert_eq!(cycle_1.lane, "main");
+    assert_eq!(cycle_1.label, "IF");
+
+    let cycle_2 = timeline_cell_at(&rows[0], 2).expect("cycle 2 cell");
+    assert_eq!(cycle_2.stage, "ID");
+    assert_eq!(cycle_2.lane, "stall");
+    assert_eq!(cycle_2.label, "ID/stall");
+
+    assert_eq!(
+        timeline_cell_at(&rows[0], 3).expect("cycle 3 cell").label,
+        "ID/stall"
+    );
 }
 
 #[test]
@@ -61,6 +71,67 @@ fn timeline_runs_merge_adjacent_matching_cells() {
     assert_eq!(runs[1].cell.as_ref().expect("stall run").label, "ID/stall");
     assert_eq!(runs[2].width, 1);
     assert_eq!(runs[2].cell.as_ref().expect("EX run").label, "EX");
+}
+
+#[test]
+fn timeline_rows_keep_long_spans_compact() {
+    let trace = parse_plog(concat!(
+        "PLOG\t1\n",
+        "STAGE\tLS\tLoadStore\n",
+        "LANE\tstall\tStall\n",
+        "I\t1\n",
+        "B\t100\t4096\t1\tstall\tLS\treason=dcache_miss\n",
+        "R\t4200\t1\tretire\n",
+    ))
+    .expect("valid trace");
+
+    let rows = build_timeline_rows(&trace);
+
+    assert_eq!(rows[0].spans.len(), 1);
+    assert_eq!(rows[0].last_cycle, Some(4195));
+    assert_eq!(
+        timeline_cell_at(&rows[0], 4195)
+            .expect("last occupied cycle")
+            .label,
+        "LS/stall"
+    );
+}
+
+#[test]
+fn overlapping_timeline_spans_preserve_later_record_precedence() {
+    let trace = parse_plog(concat!(
+        "PLOG\t1\n",
+        "STAGE\tIF\tFetch\n",
+        "STAGE\tID\tDecode\n",
+        "LANE\tmain\tMain\n",
+        "LANE\tstall\tStall\n",
+        "I\t1\n",
+        "B\t10\t5\t1\tmain\tIF\n",
+        "B\t12\t2\t1\tstall\tID\treason=load_use\n",
+        "R\t16\t1\tretire\n",
+    ))
+    .expect("valid trace");
+
+    let rows = build_timeline_rows(&trace);
+    let runs = timeline_runs(&rows[0], 10, 5);
+
+    assert_eq!(rows[0].spans.len(), 3);
+    assert_eq!(
+        timeline_cell_at(&rows[0], 11).expect("cycle 11 cell").label,
+        "IF"
+    );
+    assert_eq!(
+        timeline_cell_at(&rows[0], 12).expect("cycle 12 cell").label,
+        "ID/stall"
+    );
+    assert_eq!(
+        timeline_cell_at(&rows[0], 14).expect("cycle 14 cell").label,
+        "IF"
+    );
+    assert_eq!(runs.len(), 3);
+    assert_eq!(runs[0].width, 2);
+    assert_eq!(runs[1].width, 2);
+    assert_eq!(runs[2].width, 1);
 }
 
 #[test]

@@ -59,7 +59,15 @@ pub(super) struct App {
 pub struct TimelineRow {
     pub inst_id: u64,
     pub label: String,
-    pub cells: BTreeMap<u64, TimelineCell>,
+    pub spans: Vec<TimelineSpan>,
+    pub last_cycle: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineSpan {
+    pub cycle: u64,
+    pub duration: u64,
+    pub cell: TimelineCell,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,7 +281,7 @@ impl App {
         let Some(row) = self.selected_row() else {
             return;
         };
-        if let Some(last_cycle) = row.cells.keys().next_back().copied() {
+        if let Some(last_cycle) = row.last_cycle {
             self.cycle_offset = last_cycle;
             self.status = format!(
                 "jumped to last cycle {last_cycle} for row {}",
@@ -483,36 +491,78 @@ pub fn timeline_runs(
     visible_cycles: u64,
 ) -> Vec<TimelineRun> {
     let mut runs = Vec::new();
-    let mut offset = 0;
+    let window_end = cycle_offset.saturating_add(visible_cycles);
+    let mut cursor = cycle_offset;
 
-    while offset < visible_cycles {
-        let start_cycle = cycle_offset + offset;
-        let cell = row.cells.get(&start_cycle);
-        let mut width = 1;
-
-        while offset + width < visible_cycles
-            && same_timeline_cell(cell, row.cells.get(&(start_cycle + width)))
-        {
-            width += 1;
+    for span in &row.spans {
+        let span_end = span.cycle.saturating_add(span.duration);
+        if span_end <= cursor {
+            continue;
+        }
+        if span.cycle >= window_end {
+            break;
         }
 
-        runs.push(TimelineRun {
-            offset,
-            width,
-            cell: cell.cloned(),
-        });
-        offset += width;
+        if span.cycle > cursor {
+            push_timeline_run(
+                &mut runs,
+                cycle_offset,
+                cursor,
+                span.cycle.min(window_end) - cursor,
+                None,
+            );
+            cursor = span.cycle;
+            if cursor >= window_end {
+                break;
+            }
+        }
+
+        let clipped_end = span_end.min(window_end);
+        if clipped_end > cursor {
+            push_timeline_run(
+                &mut runs,
+                cycle_offset,
+                cursor,
+                clipped_end - cursor,
+                Some(span.cell.clone()),
+            );
+            cursor = clipped_end;
+        }
+        if cursor >= window_end {
+            break;
+        }
+    }
+
+    if cursor < window_end {
+        push_timeline_run(&mut runs, cycle_offset, cursor, window_end - cursor, None);
     }
 
     runs
 }
 
-fn same_timeline_cell(left: Option<&TimelineCell>, right: Option<&TimelineCell>) -> bool {
-    match (left, right) {
-        (Some(left), Some(right)) => left == right,
-        (None, None) => true,
-        _ => false,
+fn push_timeline_run(
+    runs: &mut Vec<TimelineRun>,
+    cycle_offset: u64,
+    cycle: u64,
+    width: u64,
+    cell: Option<TimelineCell>,
+) {
+    if width == 0 {
+        return;
     }
+
+    if let Some(last) = runs.last_mut()
+        && last.cell == cell
+    {
+        last.width += width;
+        return;
+    }
+
+    runs.push(TimelineRun {
+        offset: cycle.saturating_sub(cycle_offset),
+        width,
+        cell,
+    });
 }
 
 fn fit_left(value: &str, width: usize) -> String {
@@ -769,10 +819,11 @@ pub fn build_timeline_rows(trace: &Trace) -> Vec<TimelineRow> {
                 .get(&instruction.inst_id)
                 .cloned()
                 .unwrap_or_else(|| format!("#{}", instruction.inst_id)),
-            cells: BTreeMap::new(),
+            spans: Vec::new(),
+            last_cycle: None,
         })
         .collect::<Vec<_>>();
-    let mut row_indexes = rows
+    let row_indexes = rows
         .iter()
         .enumerate()
         .map(|(index, row)| (row.inst_id, index))
@@ -782,16 +833,97 @@ pub fn build_timeline_rows(trace: &Trace) -> Vec<TimelineRow> {
         let Some(row_index) = row_indexes.get(&span.inst_id).copied() else {
             continue;
         };
-        for cycle in span.cycle..span.cycle + span.duration {
-            rows[row_index]
-                .cells
-                .insert(cycle, timeline_cell(&span.stage, &span.lane));
+        if let Some(cycle) = span.cycle.checked_add(span.duration - 1) {
+            rows[row_index].last_cycle = Some(
+                rows[row_index]
+                    .last_cycle
+                    .map_or(cycle, |last| last.max(cycle)),
+            );
         }
+        insert_timeline_span(
+            &mut rows[row_index].spans,
+            TimelineSpan {
+                cycle: span.cycle,
+                duration: span.duration,
+                cell: timeline_cell(&span.stage, &span.lane),
+            },
+        );
     }
 
     rows.sort_by_key(|row| row.inst_id);
-    row_indexes.clear();
+    for row in &mut rows {
+        row.spans.sort_by_key(|span| span.cycle);
+    }
     rows
+}
+
+pub fn timeline_cell_at(row: &TimelineRow, cycle: u64) -> Option<&TimelineCell> {
+    row.spans
+        .iter()
+        .find(|span| cycle >= span.cycle && cycle < span.cycle.saturating_add(span.duration))
+        .map(|span| &span.cell)
+}
+
+fn insert_timeline_span(spans: &mut Vec<TimelineSpan>, span: TimelineSpan) {
+    let span_end = span.cycle.saturating_add(span.duration);
+
+    if let Some(last) = spans.last_mut() {
+        let last_end = last.cycle.saturating_add(last.duration);
+        if last_end <= span.cycle {
+            if last_end == span.cycle && last.cell == span.cell {
+                last.duration = last.duration.saturating_add(span.duration);
+            } else {
+                spans.push(span);
+            }
+            return;
+        }
+    } else {
+        spans.push(span);
+        return;
+    }
+
+    let mut next = Vec::with_capacity(spans.len() + 1);
+
+    for existing in spans.drain(..) {
+        let existing_end = existing.cycle.saturating_add(existing.duration);
+        if existing_end <= span.cycle || existing.cycle >= span_end {
+            next.push(existing);
+            continue;
+        }
+
+        if existing.cycle < span.cycle {
+            next.push(TimelineSpan {
+                cycle: existing.cycle,
+                duration: span.cycle - existing.cycle,
+                cell: existing.cell.clone(),
+            });
+        }
+
+        if existing_end > span_end {
+            next.push(TimelineSpan {
+                cycle: span_end,
+                duration: existing_end - span_end,
+                cell: existing.cell,
+            });
+        }
+    }
+
+    next.push(span);
+    next.sort_by_key(|span| span.cycle);
+    merge_timeline_spans(next, spans);
+}
+
+fn merge_timeline_spans(input: Vec<TimelineSpan>, output: &mut Vec<TimelineSpan>) {
+    for span in input {
+        if let Some(last) = output.last_mut()
+            && last.cell == span.cell
+            && last.cycle.saturating_add(last.duration) == span.cycle
+        {
+            last.duration = last.duration.saturating_add(span.duration);
+            continue;
+        }
+        output.push(span);
+    }
 }
 
 pub fn build_instruction_details(trace: &Trace) -> BTreeMap<u64, InstructionDetail> {

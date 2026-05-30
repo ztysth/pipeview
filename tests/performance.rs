@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use pipeview::analysis::summarize;
 use pipeview::parser::parse_plog;
+use pipeview::tui::build_timeline_rows;
 
 const CLASSIC_5STAGE: &str = include_str!("../examples/classic_5stage_bottleneck.plog");
 const CLASSIC_OOO: &str = include_str!("../examples/classic_ooo_bottleneck.plog");
@@ -18,6 +19,30 @@ fn large_fixtures_parse_and_summarize_within_smoke_threshold() {
     assert!(
         ooo < Duration::from_secs(5),
         "classic_ooo_bottleneck took {ooo:?}"
+    );
+}
+
+#[test]
+fn large_fixture_timeline_rows_build_without_cycle_expansion() {
+    let trace = parse_plog(CLASSIC_5STAGE).expect("large fixture parses");
+    let start = Instant::now();
+    let rows = build_timeline_rows(&trace);
+    let elapsed = start.elapsed();
+    let stored_spans = rows.iter().map(|row| row.spans.len()).sum::<usize>();
+
+    assert_eq!(rows.len(), trace.instructions.len());
+    assert_eq!(stored_spans, trace.spans.len());
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "timeline row build took {elapsed:?}"
+    );
+
+    eprintln!(
+        "timeline_rows: instructions={} trace_spans={} stored_spans={} elapsed_ms={:.3}",
+        trace.instructions.len(),
+        trace.spans.len(),
+        stored_spans,
+        elapsed.as_secs_f64() * 1000.0
     );
 }
 
