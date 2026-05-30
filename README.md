@@ -22,6 +22,23 @@ Print a text report:
 cargo run -- report examples/classic_5stage_bottleneck.plog
 ```
 
+Compress a PLog file as `.zst` and remove the original PLog file:
+
+将 PLog 文件压缩为 `.zst` 并删除原始 PLog 文件:
+
+```bash
+cargo run -- compress examples/classic_5stage_bottleneck.plog
+```
+
+Compressed `.zst` PLog files can be used directly with the TUI, `validate`,
+and `report` commands:
+
+压缩后的 `.zst` PLog 文件可以直接用于 TUI、`validate` 和 `report` 命令:
+
+```bash
+cargo run -- report examples/classic_5stage_bottleneck.plog.zst
+```
+
 ## Theme
 
 The TUI colors stages by default. Stage colors are assigned by the `STAGE`
