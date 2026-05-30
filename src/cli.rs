@@ -1,4 +1,3 @@
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -6,6 +5,7 @@ use clap::{Parser, Subcommand};
 
 use crate::analysis::{SpanStats, Summary, summarize};
 use crate::parser::parse_plog;
+use crate::plog_io::{compress_plog_file, read_plog_text};
 use crate::tui::{self, ColorMode, Theme};
 
 #[derive(Debug, Parser)]
@@ -33,6 +33,9 @@ enum Command {
 
     /// Print a text summary for a PLog file.
     Report { path: PathBuf },
+
+    /// Compress a PLog file as .zst and remove the original file.
+    Compress { path: PathBuf },
 }
 
 pub fn run() -> Result<()> {
@@ -46,6 +49,10 @@ pub fn run() -> Result<()> {
         (Some(Command::Report { path }), None) => {
             let trace = load_trace(&path)?;
             print_report(&path, &summarize(&trace));
+        }
+        (Some(Command::Compress { path }), None) => {
+            let output_path = compress_plog_file(&path)?;
+            println!("compressed: {}", output_path.display());
         }
         (None, Some(path)) => {
             let trace = load_trace(&path)?;
@@ -67,8 +74,7 @@ pub fn run() -> Result<()> {
 }
 
 fn load_trace(path: &Path) -> Result<crate::model::Trace> {
-    let input =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let input = read_plog_text(path)?;
     parse_plog(&input).with_context(|| format!("failed to parse {}", path.display()))
 }
 
@@ -81,8 +87,8 @@ fn load_theme(path: Option<&Path>, no_color: bool) -> Result<Theme> {
         return Ok(Theme::new(ColorMode::Default));
     };
 
-    let input =
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let input = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
     Theme::from_json_str(&input).with_context(|| format!("failed to parse {}", path.display()))
 }
 
