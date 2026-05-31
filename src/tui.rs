@@ -716,7 +716,7 @@ fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect) {
         Line::from("End jump to selected row last block"),
         Line::from("g jump to row,cycle    i toggle info    d toggle detail    ? toggle help"),
         Line::from("+ / = zoom in    - zoom out"),
-        Line::from("mouse wheel moves rows    Shift + mouse wheel moves cycles"),
+        Line::from("mouse wheel moves rows    Alt + mouse wheel moves cycles"),
         Line::from("Ctrl + mouse wheel zooms when supported"),
     ];
     frame.render_widget(

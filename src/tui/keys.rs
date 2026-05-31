@@ -91,7 +91,7 @@ pub(super) fn handle_event(app: &mut App, event: Event) -> bool {
             }
             true
         }
-        Event::Mouse(mouse) if mouse.modifiers.contains(KeyModifiers::SHIFT) => {
+        Event::Mouse(mouse) if mouse.modifiers.contains(KeyModifiers::ALT) => {
             match mouse.kind {
                 MouseEventKind::ScrollUp => app.move_left(),
                 MouseEventKind::ScrollDown => app.move_right(),
