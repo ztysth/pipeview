@@ -107,7 +107,7 @@ wheel shortcuts mirror those movements.
 | `+` / `=` | Zoom in |
 | `-` | Zoom out |
 | `Mouse wheel` | Move between instruction rows |
-| `Shift + mouse wheel` | Move the cycle window |
+| `Alt + mouse wheel` | Move the cycle window |
 | `Ctrl + mouse wheel` | Zoom when supported by the terminal |
 
 | 快捷键 | 功能 |
@@ -124,7 +124,7 @@ wheel shortcuts mirror those movements.
 | `+` / `=` | 放大 |
 | `-` | 缩小 |
 | `鼠标滚轮` | 在指令行之间移动 |
-| `Shift + 鼠标滚轮` | 移动 cycle 窗口 |
+| `Alt + 鼠标滚轮` | 移动 cycle 窗口 |
 | `Ctrl + 鼠标滚轮` | 在终端支持时缩放 |
 
 ## License
