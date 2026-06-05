@@ -14,6 +14,16 @@ Open a PLog file in the terminal timeline view:
 cargo run -- examples/classic_5stage_bottleneck.plog
 ```
 
+Open a large PLog by raising the uncompressed input limit. The default limit is
+512 MiB and applies after `.zst` decompression:
+
+提高未压缩输入大小上限后打开更大的 PLog. 默认上限是 512 MiB, 并且会作用在
+`.zst` 解压后的文本大小上:
+
+```bash
+cargo run -- --max-input-mib 2048 examples/classic_5stage_bottleneck.plog.zst
+```
+
 Print a text report:
 
 输出文本报告:
@@ -38,6 +48,96 @@ and `report` commands:
 ```bash
 cargo run -- report examples/classic_5stage_bottleneck.plog.zst
 ```
+
+## PLog Format
+
+PLog is a tab-separated text format. Each file starts with `PLOG	1`. Fields
+are separated by tabs, and optional attributes use `key=value`.
+
+PLog 是一种使用 tab 分隔的文本格式. 每个文件以 `PLOG	1` 开头. 字段之间
+使用 tab 分隔, 可选属性使用 `key=value`.
+
+```text
+PLOG	1
+META	source	example
+STAGE	IF	Fetch	order=10
+STAGE	ID	Decode	order=20
+LANE	main	Main	order=0
+I	1	pc=0x80000000	inst=0x00000013
+B	0	1	1	main	IF
+B	1	2	1	main	ID	stall=decode
+E	1	1	note	reason=hazard
+C	1	fetch_queue	used=2
+R	3	1	retire
+```
+
+Supported records:
+
+支持的记录:
+
+| Record | Fields | Meaning |
+| --- | --- | --- |
+| `PLOG` | `PLOG version` | File header. Version must be `1`. |
+| `META` | `META key value` | File-level metadata. |
+| `STAGE` | `STAGE id label [attrs...]` | Pipeline stage declaration. |
+| `LANE` | `LANE id label [attrs...]` | Lane declaration. |
+| `I` | `I inst_id [attrs...]` | Instruction declaration. |
+| `B` | `B cycle duration inst_id lane stage [attrs...]` | Stage span. Duration is in cycles. |
+| `E` | `E cycle inst_id event [attrs...]` | Per-instruction event. |
+| `C` | `C cycle resource [attrs...]` | Counter/resource sample. |
+| `R` | `R cycle inst_id status [attrs...]` | Retire or final instruction status. |
+
+| 记录 | 字段 | 含义 |
+| --- | --- | --- |
+| `PLOG` | `PLOG version` | 文件头. 版本必须是 `1`. |
+| `META` | `META key value` | 文件级元数据. |
+| `STAGE` | `STAGE id label [attrs...]` | 流水级声明. |
+| `LANE` | `LANE id label [attrs...]` | 通道声明. |
+| `I` | `I inst_id [attrs...]` | 指令声明. |
+| `B` | `B cycle duration inst_id lane stage [attrs...]` | 阶段 span. duration 单位是 cycle. |
+| `E` | `E cycle inst_id event [attrs...]` | 指令事件. |
+| `C` | `C cycle resource [attrs...]` | 计数器或资源采样. |
+| `R` | `R cycle inst_id status [attrs...]` | 退休或最终指令状态. |
+
+## Options
+
+Global options are placed before the positional path or subcommand:
+
+全局参数放在位置路径或子命令之前:
+
+| Option | Meaning |
+| --- | --- |
+| `--no-color` | Disable stage colors in the TUI. |
+| `--theme <PATH>` | Load a JSON stage color theme for the TUI. |
+| `--max-input-mib <MIB>` | Maximum uncompressed PLog text to read. Default: `512`. |
+| `-h`, `--help` | Print help. |
+| `-V`, `--version` | Print version. |
+
+| 参数 | 含义 |
+| --- | --- |
+| `--no-color` | 关闭 TUI 阶段配色. |
+| `--theme <PATH>` | 为 TUI 加载 JSON 阶段配色主题. |
+| `--max-input-mib <MIB>` | 最大可读取的未压缩 PLog 文本大小. 默认值: `512`. |
+| `-h`, `--help` | 输出帮助. |
+| `-V`, `--version` | 输出版本. |
+
+Commands:
+
+子命令:
+
+| Command | Meaning |
+| --- | --- |
+| `pipeview <PATH>` | Open a PLog or `.zst` PLog in the TUI. |
+| `pipeview validate <PATH>` | Validate a PLog or `.zst` PLog. |
+| `pipeview report <PATH>` | Print a text summary. |
+| `pipeview compress <PATH>` | Compress a plain PLog as `.zst` and delete the original file. |
+
+| 子命令 | 含义 |
+| --- | --- |
+| `pipeview <PATH>` | 在 TUI 中打开 PLog 或 `.zst` PLog. |
+| `pipeview validate <PATH>` | 检查 PLog 或 `.zst` PLog 是否有效. |
+| `pipeview report <PATH>` | 输出文本报告. |
+| `pipeview compress <PATH>` | 将普通 PLog 压缩为 `.zst` 并删除原文件. |
 
 ## Theme
 
