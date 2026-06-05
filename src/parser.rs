@@ -68,15 +68,15 @@ pub fn parse_plog(input: &str) -> Result<Trace, ParseError> {
         return Err(ParseError::EmptyInput);
     }
 
-    let mut records = Vec::new();
+    let mut builder = TraceBuilder::default();
     for (index, raw_line) in input.lines().enumerate() {
         let line_number = index + 1;
         let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
         let record = parse_line(line).map_err(|message| ParseError::line(line_number, message))?;
-        records.push(record);
+        builder.push(record)?;
     }
 
-    build_trace(records)
+    builder.finish()
 }
 
 fn parse_line(line: &str) -> Result<RawRecord<'_>, String> {
@@ -269,39 +269,42 @@ fn require_non_empty(value: &str, label: &str) -> Result<(), String> {
     }
 }
 
-fn build_trace(records: Vec<RawRecord<'_>>) -> Result<Trace, ParseError> {
-    let mut version = None;
-    let mut meta = Vec::new();
-    let mut stages = Vec::new();
-    let mut lanes = Vec::new();
-    let mut instructions = Vec::new();
-    let mut spans = Vec::new();
-    let mut events = Vec::new();
-    let mut counters = Vec::new();
-    let mut retires = Vec::new();
+#[derive(Default)]
+struct TraceBuilder {
+    version: Option<u32>,
+    meta: Vec<KeyValue>,
+    stages: Vec<Stage>,
+    lanes: Vec<Lane>,
+    instructions: Vec<Instruction>,
+    spans: Vec<Span>,
+    events: Vec<Event>,
+    counters: Vec<Counter>,
+    retires: Vec<RetireEvent>,
+}
 
-    for record in records {
+impl TraceBuilder {
+    fn push(&mut self, record: RawRecord<'_>) -> Result<(), ParseError> {
         match record {
             RawRecord::Header(record_version) => {
-                if version.replace(record_version).is_some() {
+                if self.version.replace(record_version).is_some() {
                     return Err(ValidationError::DuplicateHeader.into());
                 }
             }
-            RawRecord::Meta(key, value) => meta.push(KeyValue {
+            RawRecord::Meta(key, value) => self.meta.push(KeyValue {
                 key: key.to_owned(),
                 value: value.to_owned(),
             }),
-            RawRecord::Stage { id, label, attrs } => stages.push(Stage {
+            RawRecord::Stage { id, label, attrs } => self.stages.push(Stage {
                 id: id.to_owned(),
                 label: label.to_owned(),
                 attrs: own_attrs(attrs),
             }),
-            RawRecord::Lane { id, label, attrs } => lanes.push(Lane {
+            RawRecord::Lane { id, label, attrs } => self.lanes.push(Lane {
                 id: id.to_owned(),
                 label: label.to_owned(),
                 attrs: own_attrs(attrs),
             }),
-            RawRecord::Instruction { inst_id, attrs } => instructions.push(Instruction {
+            RawRecord::Instruction { inst_id, attrs } => self.instructions.push(Instruction {
                 inst_id,
                 attrs: own_attrs(attrs),
             }),
@@ -312,7 +315,7 @@ fn build_trace(records: Vec<RawRecord<'_>>) -> Result<Trace, ParseError> {
                 lane,
                 stage,
                 attrs,
-            } => spans.push(Span {
+            } => self.spans.push(Span {
                 cycle,
                 duration,
                 inst_id,
@@ -325,7 +328,7 @@ fn build_trace(records: Vec<RawRecord<'_>>) -> Result<Trace, ParseError> {
                 inst_id,
                 event,
                 attrs,
-            } => events.push(Event {
+            } => self.events.push(Event {
                 cycle,
                 inst_id,
                 event: event.to_owned(),
@@ -335,7 +338,7 @@ fn build_trace(records: Vec<RawRecord<'_>>) -> Result<Trace, ParseError> {
                 cycle,
                 resource,
                 attrs,
-            } => counters.push(Counter {
+            } => self.counters.push(Counter {
                 cycle,
                 resource: resource.to_owned(),
                 attrs: own_attrs(attrs),
@@ -345,29 +348,33 @@ fn build_trace(records: Vec<RawRecord<'_>>) -> Result<Trace, ParseError> {
                 inst_id,
                 status,
                 attrs,
-            } => retires.push(RetireEvent {
+            } => self.retires.push(RetireEvent {
                 cycle,
                 inst_id,
                 status: status.to_owned(),
                 attrs: own_attrs(attrs),
             }),
         }
+
+        Ok(())
     }
 
-    let trace = Trace {
-        version: version.ok_or(ValidationError::MissingHeader)?,
-        meta,
-        stages,
-        lanes,
-        instructions,
-        spans,
-        events,
-        counters,
-        retires,
-    };
+    fn finish(self) -> Result<Trace, ParseError> {
+        let trace = Trace {
+            version: self.version.ok_or(ValidationError::MissingHeader)?,
+            meta: self.meta,
+            stages: self.stages,
+            lanes: self.lanes,
+            instructions: self.instructions,
+            spans: self.spans,
+            events: self.events,
+            counters: self.counters,
+            retires: self.retires,
+        };
 
-    validate_trace(&trace)?;
-    Ok(trace)
+        validate_trace(&trace)?;
+        Ok(trace)
+    }
 }
 
 fn own_attrs(attrs: Vec<RawKeyValue<'_>>) -> AttrMap {

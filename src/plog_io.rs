@@ -7,12 +7,17 @@ use anyhow::{Context, Result, bail};
 
 const ZSTD_EXTENSION: &str = "zst";
 const ZSTD_LEVEL: i32 = 3;
+pub const DEFAULT_MAX_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 
 pub fn read_plog_text(path: &Path) -> Result<String> {
+    read_plog_text_with_limit(path, DEFAULT_MAX_INPUT_BYTES)
+}
+
+pub fn read_plog_text_with_limit(path: &Path, max_bytes: u64) -> Result<String> {
     if is_zstd_path(path) {
-        read_zstd_text(path)
+        read_zstd_text(path, max_bytes)
     } else {
-        fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))
+        read_plain_text(path, max_bytes)
     }
 }
 
@@ -42,15 +47,57 @@ pub fn compressed_path(path: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-fn read_zstd_text(path: &Path) -> Result<String> {
+fn read_plain_text(path: &Path, max_bytes: u64) -> Result<String> {
+    let metadata =
+        fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+    if metadata.len() > max_bytes {
+        bail!(
+            "{} is {} MiB, above the configured input limit of {} MiB",
+            path.display(),
+            bytes_to_mib(metadata.len()),
+            bytes_to_mib(max_bytes)
+        );
+    }
+
+    let input = File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+    read_limited_utf8(input, max_bytes, path, "read")
+}
+
+fn read_zstd_text(path: &Path, max_bytes: u64) -> Result<String> {
     let input = File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
     let mut decoder = zstd::Decoder::new(input)
         .with_context(|| format!("failed to decode {}", path.display()))?;
-    let mut text = String::new();
-    decoder
-        .read_to_string(&mut text)
-        .with_context(|| format!("failed to read decoded text from {}", path.display()))?;
-    Ok(text)
+    read_limited_utf8(&mut decoder, max_bytes, path, "read decoded text from")
+}
+
+fn read_limited_utf8<R: Read>(
+    reader: R,
+    max_bytes: u64,
+    path: &Path,
+    operation: &str,
+) -> Result<String> {
+    let limit = max_bytes
+        .checked_add(1)
+        .context("configured input limit is too large")?;
+    let mut limited = reader.take(limit);
+    let mut bytes = Vec::new();
+    limited
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to {operation} {}", path.display()))?;
+
+    if bytes.len() as u64 > max_bytes {
+        bail!(
+            "{} exceeds the configured decompressed input limit of {} MiB",
+            path.display(),
+            bytes_to_mib(max_bytes)
+        );
+    }
+
+    String::from_utf8(bytes).with_context(|| format!("{} is not valid UTF-8", path.display()))
+}
+
+fn bytes_to_mib(bytes: u64) -> u64 {
+    bytes.div_ceil(1024 * 1024)
 }
 
 fn is_zstd_path(path: &Path) -> bool {

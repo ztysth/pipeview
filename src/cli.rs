@@ -5,7 +5,7 @@ use clap::{Parser, Subcommand};
 
 use crate::analysis::{SpanStats, Summary, summarize};
 use crate::parser::parse_plog;
-use crate::plog_io::{compress_plog_file, read_plog_text};
+use crate::plog_io::{DEFAULT_MAX_INPUT_BYTES, compress_plog_file, read_plog_text_with_limit};
 use crate::tui::{self, ColorMode, Theme};
 
 #[derive(Debug, Parser)]
@@ -21,6 +21,10 @@ pub struct Args {
     /// Load a JSON stage color theme for the terminal timeline view.
     #[arg(long, value_name = "PATH")]
     theme: Option<PathBuf>,
+
+    /// Maximum uncompressed PLog input size to read.
+    #[arg(long, default_value_t = default_max_input_mib(), value_name = "MIB")]
+    max_input_mib: u64,
 
     #[command(subcommand)]
     command: Option<Command>,
@@ -40,14 +44,18 @@ enum Command {
 
 pub fn run() -> Result<()> {
     let args = Args::parse();
+    let max_input_bytes = args
+        .max_input_mib
+        .checked_mul(1024 * 1024)
+        .context("--max-input-mib is too large")?;
 
     match (args.command, args.path) {
         (Some(Command::Validate { path }), None) => {
-            load_trace(&path)?;
+            load_trace(&path, max_input_bytes)?;
             println!("valid: {}", path.display());
         }
         (Some(Command::Report { path }), None) => {
-            let trace = load_trace(&path)?;
+            let trace = load_trace(&path, max_input_bytes)?;
             print_report(&path, &summarize(&trace));
         }
         (Some(Command::Compress { path }), None) => {
@@ -55,7 +63,7 @@ pub fn run() -> Result<()> {
             println!("compressed: {}", output_path.display());
         }
         (None, Some(path)) => {
-            let trace = load_trace(&path)?;
+            let trace = load_trace(&path, max_input_bytes)?;
             let theme = load_theme(args.theme.as_deref(), args.no_color)?;
             tui::run(&path, trace, theme)?;
         }
@@ -73,9 +81,13 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn load_trace(path: &Path) -> Result<crate::model::Trace> {
-    let input = read_plog_text(path)?;
+fn load_trace(path: &Path, max_input_bytes: u64) -> Result<crate::model::Trace> {
+    let input = read_plog_text_with_limit(path, max_input_bytes)?;
     parse_plog(&input).with_context(|| format!("failed to parse {}", path.display()))
+}
+
+fn default_max_input_mib() -> u64 {
+    DEFAULT_MAX_INPUT_BYTES / (1024 * 1024)
 }
 
 fn load_theme(path: Option<&Path>, no_color: bool) -> Result<Theme> {
