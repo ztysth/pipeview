@@ -1,0 +1,70 @@
+Kanata	0004
+C=	0
+I	0	0	0
+L	0	0	0x80000000 lw x1, 0(x2)
+S	0	0	IF
+C	1
+E	0	0	IF
+S	0	0	ID
+C	1
+E	0	0	ID
+S	0	0	EX
+C	1
+E	0	0	EX
+S	0	0	LS
+C	3
+E	0	0	LS
+S	0	0	WB
+C	1
+E	0	0	WB
+R	0	0	0
+I	1	4	0
+L	1	0	0x80000004 add x3, x1, x4
+S	1	0	IF
+C	1
+E	1	0	IF
+S	1	0	ID
+C	1
+E	1	0	ID
+S	1	1	STL
+L	1	1	wait for x1
+C	2
+E	1	1	STL
+S	1	0	EX
+C	1
+E	1	0	EX
+S	1	0	WB
+C	1
+E	1	0	WB
+R	1	1	0
+I	2	8	0
+L	2	0	0x80000008 beq x3, x0, 0x80000018
+S	2	0	IF
+C	1
+E	2	0	IF
+S	2	0	ID
+C	1
+E	2	0	ID
+S	2	0	EX
+C	1
+E	2	0	EX
+S	2	1	FL
+L	2	1	branch redirect
+C	2
+E	2	1	FL
+R	2	2	1
+I	3	12	0
+L	3	0	0x8000000c sub x5, x6, x7
+S	3	0	IF
+C	1
+E	3	0	IF
+S	3	0	ID
+C	1
+E	3	0	ID
+S	3	0	EX
+C	1
+E	3	0	EX
+S	3	0	WB
+C	1
+E	3	0	WB
+R	3	3	0
