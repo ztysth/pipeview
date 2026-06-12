@@ -15,6 +15,7 @@ pub const DEFAULT_MAX_INPUT_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputFormat {
+    Auto,
     Plog,
     Konata,
 }
@@ -55,6 +56,7 @@ pub fn read_plog_preview_trace(path: &Path, max_bytes: u64, span_limit: usize) -
 }
 
 pub fn read_trace(path: &Path, max_bytes: u64, format: InputFormat) -> Result<Trace> {
+    let format = resolve_input_format(path, format);
     if is_zstd_path(path) {
         read_zstd_trace(path, max_bytes, format)
     } else {
@@ -91,8 +93,17 @@ pub fn read_konata_preview_trace(
 
 fn parse_reader<R: std::io::BufRead>(reader: R, format: InputFormat) -> Result<Trace> {
     match format {
+        InputFormat::Auto => unreachable!("input format must be resolved before parsing"),
         InputFormat::Plog => parse_plog_reader(reader).map_err(Into::into),
         InputFormat::Konata => parse_konata_reader(reader).map_err(Into::into),
+    }
+}
+
+pub fn resolve_input_format(path: &Path, format: InputFormat) -> InputFormat {
+    match format {
+        InputFormat::Auto if is_konata_log_path(path) => InputFormat::Konata,
+        InputFormat::Auto => InputFormat::Plog,
+        explicit => explicit,
     }
 }
 
@@ -238,4 +249,35 @@ impl<R: Read> Read for LimitedReader<'_, R> {
 fn is_zstd_path(path: &Path) -> bool {
     path.extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case(ZSTD_EXTENSION))
+}
+
+fn is_konata_log_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    name.ends_with(".log") || name.ends_with(".log.zst")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::{InputFormat, resolve_input_format};
+
+    #[test]
+    fn auto_input_format_uses_konata_for_log_paths() {
+        assert_eq!(
+            resolve_input_format(Path::new("trace.log"), InputFormat::Auto),
+            InputFormat::Konata
+        );
+        assert_eq!(
+            resolve_input_format(Path::new("trace.log.zst"), InputFormat::Auto),
+            InputFormat::Konata
+        );
+        assert_eq!(
+            resolve_input_format(Path::new("trace.plog.zst"), InputFormat::Auto),
+            InputFormat::Plog
+        );
+    }
 }

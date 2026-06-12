@@ -10,7 +10,7 @@ use crate::tui::{self, ColorMode, Theme};
 #[derive(Debug, Parser)]
 #[command(version, about = "Visualize configurable CPU and RTL pipeline logs")]
 pub struct Args {
-    /// Open a PLog file in the terminal timeline view.
+    /// Open a pipeline log in the terminal timeline view.
     path: Option<PathBuf>,
 
     /// Disable stage colors in the terminal timeline view.
@@ -25,8 +25,8 @@ pub struct Args {
     #[arg(long, default_value_t = default_max_input_mib(), value_name = "MIB")]
     max_input_mib: u64,
 
-    /// Input trace format.
-    #[arg(long, value_enum, default_value_t = CliInputFormat::Plog)]
+    /// Input trace format. Auto uses Konata for .log/.log.zst files and PLog otherwise.
+    #[arg(long, value_enum, default_value_t = CliInputFormat::Auto)]
     format: CliInputFormat,
 
     /// Enable experimental bottleneck analysis in reports and the TUI.
@@ -39,19 +39,20 @@ pub struct Args {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum CliInputFormat {
+    Auto,
     Plog,
     Konata,
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Validate a PLog file.
+    /// Validate a pipeline log.
     Validate { path: PathBuf },
 
-    /// Print a text summary for a PLog file.
+    /// Print a text summary for a pipeline log.
     Report { path: PathBuf },
 
-    /// Compress a PLog file as .zst and remove the original file.
+    /// Compress a plain log file as .zst and remove the original file.
     Compress { path: PathBuf },
 }
 
@@ -136,6 +137,7 @@ fn load_theme(path: Option<&Path>, no_color: bool) -> Result<Theme> {
 impl From<CliInputFormat> for InputFormat {
     fn from(value: CliInputFormat) -> Self {
         match value {
+            CliInputFormat::Auto => InputFormat::Auto,
             CliInputFormat::Plog => InputFormat::Plog,
             CliInputFormat::Konata => InputFormat::Konata,
         }

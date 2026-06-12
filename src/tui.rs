@@ -22,7 +22,10 @@ use serde::Deserialize;
 
 use crate::analysis::{Summary, SummaryOptions, summarize_for_tui};
 use crate::model::{Instruction, KeyValue, RetireEvent, Span as ModelSpan, Stage, Trace};
-use crate::plog_io::{InputFormat, read_konata_preview_trace, read_plog_preview_trace, read_trace};
+use crate::plog_io::{
+    InputFormat, read_konata_preview_trace, read_plog_preview_trace, read_trace,
+    resolve_input_format,
+};
 
 mod keys;
 pub use keys::parse_jump_target;
@@ -404,19 +407,21 @@ pub fn run_path(
     let started_at = Instant::now();
     let profile_exit = env::var_os("PIPEVIEW_PROFILE_EXIT").is_some();
     let mut profile_line = None;
+    let preview_format = resolve_input_format(path, input_format);
 
     thread::spawn(move || {
         let result = read_trace(&path_buf, max_input_bytes, input_format);
         let _ = sender.send(result);
     });
 
-    let mut preview_app = match input_format {
+    let mut preview_app = match preview_format {
         InputFormat::Konata => {
             read_konata_preview_trace(path, max_input_bytes, KONATA_PREVIEW_INSTRUCTIONS).ok()
         }
         InputFormat::Plog => {
             read_plog_preview_trace(path, max_input_bytes, PLOG_PREVIEW_SPANS).ok()
         }
+        InputFormat::Auto => unreachable!("input format must be resolved before preview parsing"),
     }
     .map(|trace| {
         let mut app = App::new(path, trace, theme.clone(), summary_options);
