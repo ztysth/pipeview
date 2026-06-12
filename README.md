@@ -57,6 +57,27 @@ and `report` commands:
 cargo run -- report examples/classic_5stage_bottleneck.plog.zst
 ```
 
+Open a Konata log by selecting the Konata input format. See the
+[Konata log format documentation](https://github.com/shioyadan/Konata/blob/master/docs/kanata-log-format.md)
+for the source format:
+
+选择 Konata 输入格式即可打开 Konata 日志. Konata 源格式见
+[Konata log format documentation](https://github.com/shioyadan/Konata/blob/master/docs/kanata-log-format.md):
+
+```bash
+cargo run -- --format konata examples/konata-sample-1.log
+```
+
+Experimental bottleneck analysis is available as an opt-in report/TUI feature.
+It is disabled by default because the design is still incomplete:
+
+实验性的瓶颈分析可以通过参数显式开启, 并可用于 report/TUI. 该功能默认关闭,
+因为设计仍不完善:
+
+```bash
+cargo run -- --experimental-bottlenecks report examples/classic_5stage_bottleneck.plog
+```
+
 ## PLog Format
 
 PLog is a tab-separated text format. Each file starts with `PLOG	1`. Fields
@@ -118,6 +139,8 @@ Global options are placed before the positional path or subcommand:
 | `--no-color` | Disable stage colors in the TUI. |
 | `--theme <PATH>` | Load a JSON stage color theme for the TUI. |
 | `--max-input-mib <MIB>` | Maximum uncompressed PLog text to read. Default: `512`. |
+| `--format <plog\|konata>` | Select the input trace format. Default: `plog`. |
+| `--experimental-bottlenecks` | Enable experimental bottleneck analysis. Disabled by default. |
 | `-h`, `--help` | Print help. |
 | `-V`, `--version` | Print version. |
 
@@ -126,6 +149,8 @@ Global options are placed before the positional path or subcommand:
 | `--no-color` | 关闭 TUI 阶段配色. |
 | `--theme <PATH>` | 为 TUI 加载 JSON 阶段配色主题. |
 | `--max-input-mib <MIB>` | 最大可读取的未压缩 PLog 文本大小. 默认值: `512`. |
+| `--format <plog\|konata>` | 选择输入日志格式. 默认值: `plog`. |
+| `--experimental-bottlenecks` | 开启实验性的瓶颈分析. 默认关闭. |
 | `-h`, `--help` | 输出帮助. |
 | `-V`, `--version` | 输出版本. |
 
