@@ -4,8 +4,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use crate::analysis::{SpanStats, Summary, summarize};
-use crate::parser::parse_plog;
-use crate::plog_io::{DEFAULT_MAX_INPUT_BYTES, compress_plog_file, read_plog_text_with_limit};
+use crate::plog_io::{DEFAULT_MAX_INPUT_BYTES, compress_plog_file, read_plog_trace};
 use crate::tui::{self, ColorMode, Theme};
 
 #[derive(Debug, Parser)]
@@ -63,9 +62,8 @@ pub fn run() -> Result<()> {
             println!("compressed: {}", output_path.display());
         }
         (None, Some(path)) => {
-            let trace = load_trace(&path, max_input_bytes)?;
             let theme = load_theme(args.theme.as_deref(), args.no_color)?;
-            tui::run(&path, trace, theme)?;
+            tui::run_path(&path, theme, max_input_bytes)?;
         }
         (None, None) => {
             Args::parse_from(["pipeview", "--help"]);
@@ -82,8 +80,7 @@ pub fn run() -> Result<()> {
 }
 
 fn load_trace(path: &Path, max_input_bytes: u64) -> Result<crate::model::Trace> {
-    let input = read_plog_text_with_limit(path, max_input_bytes)?;
-    parse_plog(&input).with_context(|| format!("failed to parse {}", path.display()))
+    read_plog_trace(path, max_input_bytes)
 }
 
 fn default_max_input_mib() -> u64 {

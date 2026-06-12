@@ -1,3 +1,5 @@
+use std::io::BufRead;
+
 use nom::Parser;
 use nom::bytes::complete::{tag, take_till, take_till1};
 use nom::character::complete::{char, digit1};
@@ -68,12 +70,43 @@ pub fn parse_plog(input: &str) -> Result<Trace, ParseError> {
         return Err(ParseError::EmptyInput);
     }
 
+    parse_lines(input.lines().enumerate().map(|(index, line)| {
+        Ok((
+            index + 1,
+            line.strip_suffix('\r').unwrap_or(line).to_owned(),
+        ))
+    }))
+}
+
+pub fn parse_plog_reader<R: BufRead>(reader: R) -> Result<Trace, ParseError> {
+    let lines = reader.lines().enumerate().map(|(index, line)| {
+        line.map(|line| {
+            (
+                index + 1,
+                line.strip_suffix('\r').unwrap_or(&line).to_owned(),
+            )
+        })
+        .map_err(|error| ParseError::line(index + 1, error.to_string()))
+    });
+
+    parse_lines(lines)
+}
+
+fn parse_lines<I>(lines: I) -> Result<Trace, ParseError>
+where
+    I: IntoIterator<Item = Result<(usize, String), ParseError>>,
+{
     let mut builder = TraceBuilder::default();
-    for (index, raw_line) in input.lines().enumerate() {
-        let line_number = index + 1;
-        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
-        let record = parse_line(line).map_err(|message| ParseError::line(line_number, message))?;
+    let mut saw_line = false;
+    for line in lines {
+        let (line_number, line) = line?;
+        saw_line = true;
+        let record = parse_line(&line).map_err(|message| ParseError::line(line_number, message))?;
         builder.push(record)?;
+    }
+
+    if !saw_line {
+        return Err(ParseError::EmptyInput);
     }
 
     builder.finish()

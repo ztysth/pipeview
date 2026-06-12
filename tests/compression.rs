@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use pipeview::parser::parse_plog;
 use pipeview::plog_io::{
-    compress_plog_file, compressed_path, read_plog_text, read_plog_text_with_limit,
+    compress_plog_file, compressed_path, read_plog_text, read_plog_text_with_limit, read_plog_trace,
 };
 
 const PLOG: &str = concat!(
@@ -62,6 +62,37 @@ fn user_provided_compressed_plog_is_decompressed_for_parsing() {
 }
 
 #[test]
+fn plain_plog_can_be_streamed_into_trace() {
+    let dir = test_dir("stream-plain");
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let input_path = dir.join("trace.plog");
+    fs::write(&input_path, PLOG).expect("write plog");
+
+    let trace = read_plog_trace(&input_path, 1024).expect("stream plain plog");
+
+    assert_eq!(trace.instructions.len(), 1);
+    assert_eq!(trace.spans.len(), 1);
+
+    fs::remove_dir_all(&dir).expect("remove temp dir");
+}
+
+#[test]
+fn compressed_plog_can_be_streamed_into_trace() {
+    let dir = test_dir("stream-zstd");
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let input_path = dir.join("trace.plog.zst");
+    let compressed = zstd::stream::encode_all(PLOG.as_bytes(), 3).expect("compress plog text");
+    fs::write(&input_path, compressed).expect("write compressed plog");
+
+    let trace = read_plog_trace(&input_path, 1024).expect("stream compressed plog");
+
+    assert_eq!(trace.instructions.len(), 1);
+    assert_eq!(trace.retires.len(), 1);
+
+    fs::remove_dir_all(&dir).expect("remove temp dir");
+}
+
+#[test]
 fn already_compressed_plog_is_not_compressed_again() {
     let dir = test_dir("compress-reject-zst");
     fs::create_dir_all(&dir).expect("create temp dir");
@@ -97,7 +128,22 @@ fn compressed_plog_over_decompressed_limit_is_rejected() {
 
     let err = read_plog_text_with_limit(&input_path, 8).expect_err("limit rejects input");
 
-    assert!(err.to_string().contains("decompressed input limit"));
+    assert!(format!("{err:#}").contains("decompressed input limit"));
+
+    fs::remove_dir_all(&dir).expect("remove temp dir");
+}
+
+#[test]
+fn compressed_stream_over_decompressed_limit_is_rejected() {
+    let dir = test_dir("zstd-stream-limit");
+    fs::create_dir_all(&dir).expect("create temp dir");
+    let input_path = dir.join("trace.plog.zst");
+    let compressed = zstd::stream::encode_all(PLOG.as_bytes(), 3).expect("compress plog text");
+    fs::write(&input_path, compressed).expect("write compressed plog");
+
+    let err = read_plog_trace(&input_path, 8).expect_err("limit rejects input");
+
+    assert!(format!("{err:#}").contains("decompressed input limit"));
 
     fs::remove_dir_all(&dir).expect("remove temp dir");
 }
