@@ -14,12 +14,19 @@ Pipeline timeline view:
 
 ## Usage
 
-Open a PLog file in the terminal timeline view:
+Open a pipeline log in the terminal timeline view. `.log` and `.log.zst`
+inputs use the Konata parser by default; other paths use the PLog parser by
+default. Use `--format` to override this detection.
 
-在终端时间线视图中打开 PLog 文件:
+在终端时间线视图中打开流水线日志. `.log` 和 `.log.zst` 默认使用 Konata
+parser; 其他路径默认使用 PLog parser. 可以用 `--format` 覆盖自动判断.
 
 ```bash
 cargo run -- examples/classic_5stage_bottleneck.plog
+```
+
+```bash
+cargo run -- examples/konata-sample-1.log
 ```
 
 Open a large PLog by raising the uncompressed input limit. The default limit is
@@ -40,28 +47,36 @@ Print a text report:
 cargo run -- report examples/classic_5stage_bottleneck.plog
 ```
 
-Compress a PLog file as `.zst` and remove the original PLog file:
+Compress a plain log file as `.zst` and remove the original file:
 
-将 PLog 文件压缩为 `.zst` 并删除原始 PLog 文件:
+将普通日志文件压缩为 `.zst` 并删除原文件:
 
 ```bash
 cargo run -- compress examples/classic_5stage_bottleneck.plog
 ```
 
-Compressed `.zst` PLog files can be used directly with the TUI, `validate`,
-and `report` commands:
+```bash
+cargo run -- compress examples/konata-sample-1.log
+```
 
-压缩后的 `.zst` PLog 文件可以直接用于 TUI、`validate` 和 `report` 命令:
+Compressed `.zst` files can be used directly with the TUI, `validate`, and
+`report` commands. A `.log.zst` path uses the Konata parser in auto mode; use
+`--format konata` to force Konata parsing for any compressed path:
+
+压缩后的 `.zst` 文件可以直接用于 TUI、`validate` 和 `report` 命令. `.log.zst`
+路径在 auto 模式下使用 Konata parser; 也可以用 `--format konata` 强制任意压缩路径
+按 Konata 解析:
 
 ```bash
 cargo run -- report examples/classic_5stage_bottleneck.plog.zst
+cargo run -- --format konata report examples/konata-sample-1.log.zst
 ```
 
-Open a Konata log by selecting the Konata input format. See the
+Open a Konata log explicitly by selecting the Konata input format. See the
 [Konata log format documentation](https://github.com/shioyadan/Konata/blob/master/docs/kanata-log-format.md)
 for the source format:
 
-选择 Konata 输入格式即可打开 Konata 日志. Konata 源格式见
+也可以显式选择 Konata 输入格式打开 Konata 日志. Konata 源格式见
 [Konata log format documentation](https://github.com/shioyadan/Konata/blob/master/docs/kanata-log-format.md):
 
 ```bash
@@ -138,8 +153,8 @@ Global options are placed before the positional path or subcommand:
 | --- | --- |
 | `--no-color` | Disable stage colors in the TUI. |
 | `--theme <PATH>` | Load a JSON stage color theme for the TUI. |
-| `--max-input-mib <MIB>` | Maximum uncompressed PLog text to read. Default: `512`. |
-| `--format <plog\|konata>` | Select the input trace format. Default: `plog`. |
+| `--max-input-mib <MIB>` | Maximum uncompressed input text to read. Default: `512`. |
+| `--format <auto\|plog\|konata>` | Select the input trace format. Default: `auto`; `.log` and `.log.zst` use Konata, other paths use PLog. |
 | `--experimental-bottlenecks` | Enable experimental bottleneck analysis. Disabled by default. |
 | `-h`, `--help` | Print help. |
 | `-V`, `--version` | Print version. |
@@ -148,8 +163,8 @@ Global options are placed before the positional path or subcommand:
 | --- | --- |
 | `--no-color` | 关闭 TUI 阶段配色. |
 | `--theme <PATH>` | 为 TUI 加载 JSON 阶段配色主题. |
-| `--max-input-mib <MIB>` | 最大可读取的未压缩 PLog 文本大小. 默认值: `512`. |
-| `--format <plog\|konata>` | 选择输入日志格式. 默认值: `plog`. |
+| `--max-input-mib <MIB>` | 最大可读取的未压缩输入文本大小. 默认值: `512`. |
+| `--format <auto\|plog\|konata>` | 选择输入日志格式. 默认值: `auto`; `.log` 和 `.log.zst` 使用 Konata, 其他路径使用 PLog. |
 | `--experimental-bottlenecks` | 开启实验性的瓶颈分析. 默认关闭. |
 | `-h`, `--help` | 输出帮助. |
 | `-V`, `--version` | 输出版本. |
@@ -160,17 +175,17 @@ Commands:
 
 | Command | Meaning |
 | --- | --- |
-| `pipeview <PATH>` | Open a PLog or `.zst` PLog in the TUI. |
-| `pipeview validate <PATH>` | Validate a PLog or `.zst` PLog. |
+| `pipeview <PATH>` | Open a pipeline log in the TUI. |
+| `pipeview validate <PATH>` | Validate a pipeline log. |
 | `pipeview report <PATH>` | Print a text summary. |
-| `pipeview compress <PATH>` | Compress a plain PLog as `.zst` and delete the original file. |
+| `pipeview compress <PATH>` | Compress a plain log as `.zst` and delete the original file. |
 
 | 子命令 | 含义 |
 | --- | --- |
-| `pipeview <PATH>` | 在 TUI 中打开 PLog 或 `.zst` PLog. |
-| `pipeview validate <PATH>` | 检查 PLog 或 `.zst` PLog 是否有效. |
+| `pipeview <PATH>` | 在 TUI 中打开流水线日志. |
+| `pipeview validate <PATH>` | 检查流水线日志是否有效. |
 | `pipeview report <PATH>` | 输出文本报告. |
-| `pipeview compress <PATH>` | 将普通 PLog 压缩为 `.zst` 并删除原文件. |
+| `pipeview compress <PATH>` | 将普通日志压缩为 `.zst` 并删除原文件. |
 
 ## Theme
 
