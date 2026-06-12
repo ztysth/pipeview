@@ -79,6 +79,20 @@ pub fn parse_plog(input: &str) -> Result<Trace, ParseError> {
 }
 
 pub fn parse_plog_reader<R: BufRead>(reader: R) -> Result<Trace, ParseError> {
+    parse_plog_reader_with_limit(reader, None)
+}
+
+pub fn parse_plog_preview_reader<R: BufRead>(
+    reader: R,
+    span_limit: usize,
+) -> Result<Trace, ParseError> {
+    parse_plog_reader_with_limit(reader, Some(span_limit))
+}
+
+fn parse_plog_reader_with_limit<R: BufRead>(
+    reader: R,
+    span_limit: Option<usize>,
+) -> Result<Trace, ParseError> {
     let lines = reader.lines().enumerate().map(|(index, line)| {
         line.map(|line| {
             (
@@ -89,10 +103,17 @@ pub fn parse_plog_reader<R: BufRead>(reader: R) -> Result<Trace, ParseError> {
         .map_err(|error| ParseError::line(index + 1, error.to_string()))
     });
 
-    parse_lines(lines)
+    parse_lines_with_limit(lines, span_limit)
 }
 
 fn parse_lines<I>(lines: I) -> Result<Trace, ParseError>
+where
+    I: IntoIterator<Item = Result<(usize, String), ParseError>>,
+{
+    parse_lines_with_limit(lines, None)
+}
+
+fn parse_lines_with_limit<I>(lines: I, span_limit: Option<usize>) -> Result<Trace, ParseError>
 where
     I: IntoIterator<Item = Result<(usize, String), ParseError>>,
 {
@@ -103,13 +124,20 @@ where
         saw_line = true;
         let record = parse_line(&line).map_err(|message| ParseError::line(line_number, message))?;
         builder.push(record)?;
+        if span_limit.is_some_and(|limit| builder.spans.len() >= limit) {
+            break;
+        }
     }
 
     if !saw_line {
         return Err(ParseError::EmptyInput);
     }
 
-    builder.finish()
+    if span_limit.is_some() {
+        builder.finish_preview()
+    } else {
+        builder.finish()
+    }
 }
 
 fn parse_line(line: &str) -> Result<RawRecord<'_>, String> {
@@ -407,6 +435,20 @@ impl TraceBuilder {
 
         validate_trace(&trace)?;
         Ok(trace)
+    }
+
+    fn finish_preview(self) -> Result<Trace, ParseError> {
+        Ok(Trace {
+            version: self.version.ok_or(ValidationError::MissingHeader)?,
+            meta: self.meta,
+            stages: self.stages,
+            lanes: self.lanes,
+            instructions: self.instructions,
+            spans: self.spans,
+            events: self.events,
+            counters: self.counters,
+            retires: self.retires,
+        })
     }
 }
 

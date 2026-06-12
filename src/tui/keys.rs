@@ -70,11 +70,7 @@ pub(super) fn handle_event(app: &mut App, event: Event) -> bool {
                 true
             }
             KeyCode::Char('d') => {
-                app.overlay = if app.overlay == Overlay::Detail {
-                    Overlay::None
-                } else {
-                    Overlay::Detail
-                };
+                app.toggle_detail_overlay();
                 true
             }
             KeyCode::Char('g') => {

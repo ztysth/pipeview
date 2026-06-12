@@ -48,6 +48,20 @@ pub struct CountEntry {
 }
 
 pub fn summarize(trace: &Trace) -> Summary {
+    summarize_with_options(
+        trace,
+        SummaryOptions {
+            experimental_bottlenecks: true,
+        },
+    )
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SummaryOptions {
+    pub experimental_bottlenecks: bool,
+}
+
+pub fn summarize_with_options(trace: &Trace, options: SummaryOptions) -> Summary {
     let mut cycle_start = None;
     let mut cycle_end = None;
 
@@ -81,7 +95,26 @@ pub fn summarize(trace: &Trace) -> Summary {
         .count();
     let ipc = (cycle_count > 0).then_some(retired_count as f64 / cycle_count as f64);
 
-    let bottlenecks = bottlenecks(trace);
+    let bottlenecks = if options.experimental_bottlenecks {
+        bottlenecks(trace)
+    } else {
+        BTreeMap::new()
+    };
+    let stall_reasons = if options.experimental_bottlenecks {
+        stall_reasons(trace)
+    } else {
+        BTreeMap::new()
+    };
+    let flush_reasons = if options.experimental_bottlenecks {
+        lane_and_event_reasons(trace, "flush")
+    } else {
+        BTreeMap::new()
+    };
+    let replay_reasons = if options.experimental_bottlenecks {
+        lane_and_event_reasons(trace, "replay")
+    } else {
+        BTreeMap::new()
+    };
     let stage_stats = span_stats_by(trace, |span| span.stage.as_str());
     let lane_stats = span_stats_by(trace, |span| span.lane.as_str());
 
@@ -95,7 +128,7 @@ pub fn summarize(trace: &Trace) -> Summary {
         stage_count: trace.stages.len(),
         lane_count: trace.lanes.len(),
         ipc,
-        stall_reasons: stall_reasons(trace),
+        stall_reasons,
         top_bottlenecks: top_counts(&bottlenecks, 8),
         bottlenecks,
         status_counts: status_counts(trace),
@@ -103,8 +136,87 @@ pub fn summarize(trace: &Trace) -> Summary {
         stage_stats,
         lane_stats,
         retired_latency: retired_latency(trace),
-        flush_reasons: lane_and_event_reasons(trace, "flush"),
-        replay_reasons: lane_and_event_reasons(trace, "replay"),
+        flush_reasons,
+        replay_reasons,
+    }
+}
+
+pub fn summarize_for_tui(trace: &Trace, options: SummaryOptions) -> Summary {
+    let mut cycle_start = None;
+    let mut cycle_end = None;
+    let mut status_counts = BTreeMap::new();
+
+    for span in &trace.spans {
+        include_cycle(&mut cycle_start, &mut cycle_end, span.cycle);
+        if let Some(last_cycle) = span.cycle.checked_add(span.duration - 1) {
+            include_cycle(&mut cycle_start, &mut cycle_end, last_cycle);
+        }
+    }
+
+    for event in &trace.events {
+        include_cycle(&mut cycle_start, &mut cycle_end, event.cycle);
+    }
+
+    for counter in &trace.counters {
+        include_cycle(&mut cycle_start, &mut cycle_end, counter.cycle);
+    }
+
+    let mut retired_count = 0;
+    for retire in &trace.retires {
+        include_cycle(&mut cycle_start, &mut cycle_end, retire.cycle);
+        if retire.status == "retire" {
+            retired_count += 1;
+        }
+        *status_counts.entry(retire.status.clone()).or_insert(0) += 1;
+    }
+
+    let cycle_count = match (cycle_start, cycle_end) {
+        (Some(start), Some(end)) => end - start + 1,
+        _ => 0,
+    };
+    let ipc = (cycle_count > 0).then_some(retired_count as f64 / cycle_count as f64);
+
+    let bottlenecks = if options.experimental_bottlenecks {
+        bottlenecks(trace)
+    } else {
+        BTreeMap::new()
+    };
+    let stall_reasons = if options.experimental_bottlenecks {
+        stall_reasons(trace)
+    } else {
+        BTreeMap::new()
+    };
+    let flush_reasons = if options.experimental_bottlenecks {
+        lane_and_event_reasons(trace, "flush")
+    } else {
+        BTreeMap::new()
+    };
+    let replay_reasons = if options.experimental_bottlenecks {
+        lane_and_event_reasons(trace, "replay")
+    } else {
+        BTreeMap::new()
+    };
+
+    Summary {
+        cycle_start,
+        cycle_end,
+        cycle_count,
+        instruction_count: trace.instructions.len(),
+        retired_count,
+        span_count: trace.spans.len(),
+        stage_count: trace.stages.len(),
+        lane_count: trace.lanes.len(),
+        ipc,
+        stall_reasons,
+        top_bottlenecks: top_counts(&bottlenecks, 8),
+        bottlenecks,
+        status_counts,
+        stage_occupancy: BTreeMap::new(),
+        stage_stats: BTreeMap::new(),
+        lane_stats: BTreeMap::new(),
+        retired_latency: None,
+        flush_reasons,
+        replay_reasons,
     }
 }
 

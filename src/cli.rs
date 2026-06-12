@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
-use crate::analysis::{SpanStats, Summary, summarize};
-use crate::plog_io::{DEFAULT_MAX_INPUT_BYTES, compress_plog_file, read_plog_trace};
+use crate::analysis::{SpanStats, Summary, SummaryOptions, summarize_with_options};
+use crate::plog_io::{DEFAULT_MAX_INPUT_BYTES, InputFormat, compress_plog_file, read_trace};
 use crate::tui::{self, ColorMode, Theme};
 
 #[derive(Debug, Parser)]
@@ -25,8 +25,22 @@ pub struct Args {
     #[arg(long, default_value_t = default_max_input_mib(), value_name = "MIB")]
     max_input_mib: u64,
 
+    /// Input trace format.
+    #[arg(long, value_enum, default_value_t = CliInputFormat::Plog)]
+    format: CliInputFormat,
+
+    /// Enable experimental bottleneck analysis in reports and the TUI.
+    #[arg(long)]
+    experimental_bottlenecks: bool,
+
     #[command(subcommand)]
     command: Option<Command>,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum CliInputFormat {
+    Plog,
+    Konata,
 }
 
 #[derive(Debug, Subcommand)]
@@ -50,12 +64,18 @@ pub fn run() -> Result<()> {
 
     match (args.command, args.path) {
         (Some(Command::Validate { path }), None) => {
-            load_trace(&path, max_input_bytes)?;
+            load_trace(&path, max_input_bytes, args.format)?;
             println!("valid: {}", path.display());
         }
         (Some(Command::Report { path }), None) => {
-            let trace = load_trace(&path, max_input_bytes)?;
-            print_report(&path, &summarize(&trace));
+            let trace = load_trace(&path, max_input_bytes, args.format)?;
+            let summary = summarize_with_options(
+                &trace,
+                SummaryOptions {
+                    experimental_bottlenecks: args.experimental_bottlenecks,
+                },
+            );
+            print_report(&path, &summary, args.experimental_bottlenecks);
         }
         (Some(Command::Compress { path }), None) => {
             let output_path = compress_plog_file(&path)?;
@@ -63,7 +83,15 @@ pub fn run() -> Result<()> {
         }
         (None, Some(path)) => {
             let theme = load_theme(args.theme.as_deref(), args.no_color)?;
-            tui::run_path(&path, theme, max_input_bytes)?;
+            tui::run_path(
+                &path,
+                theme,
+                max_input_bytes,
+                args.format.into(),
+                SummaryOptions {
+                    experimental_bottlenecks: args.experimental_bottlenecks,
+                },
+            )?;
         }
         (None, None) => {
             Args::parse_from(["pipeview", "--help"]);
@@ -79,8 +107,12 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-fn load_trace(path: &Path, max_input_bytes: u64) -> Result<crate::model::Trace> {
-    read_plog_trace(path, max_input_bytes)
+fn load_trace(
+    path: &Path,
+    max_input_bytes: u64,
+    format: CliInputFormat,
+) -> Result<crate::model::Trace> {
+    read_trace(path, max_input_bytes, format.into())
 }
 
 fn default_max_input_mib() -> u64 {
@@ -101,7 +133,16 @@ fn load_theme(path: Option<&Path>, no_color: bool) -> Result<Theme> {
     Theme::from_json_str(&input).with_context(|| format!("failed to parse {}", path.display()))
 }
 
-fn print_report(path: &Path, summary: &Summary) {
+impl From<CliInputFormat> for InputFormat {
+    fn from(value: CliInputFormat) -> Self {
+        match value {
+            CliInputFormat::Plog => InputFormat::Plog,
+            CliInputFormat::Konata => InputFormat::Konata,
+        }
+    }
+}
+
+fn print_report(path: &Path, summary: &Summary, experimental_bottlenecks: bool) {
     println!("file: {}", path.display());
     println!("instructions: {}", summary.instruction_count);
     println!("retired: {}", summary.retired_count);
@@ -127,49 +168,22 @@ fn print_report(path: &Path, summary: &Summary) {
         None => println!("ipc: n/a"),
     }
 
-    if summary.stall_reasons.is_empty() {
-        println!("stall_reasons: none");
-    } else {
-        println!("stall_reasons:");
-        for (reason, count) in &summary.stall_reasons {
-            println!("  {reason}: {count}");
+    if experimental_bottlenecks {
+        println!("experimental_bottleneck_analysis: enabled");
+        print_map_counts("stall_reasons", &summary.stall_reasons);
+        print_map_counts("bottlenecks", &summary.bottlenecks);
+        if summary.top_bottlenecks.is_empty() {
+            println!("top_bottlenecks: none");
+        } else {
+            println!("top_bottlenecks:");
+            for entry in &summary.top_bottlenecks {
+                println!("  {}: {}", entry.key, entry.count);
+            }
         }
-    }
-
-    if summary.bottlenecks.is_empty() {
-        println!("bottlenecks: none");
+        print_map_counts("flush_reasons", &summary.flush_reasons);
+        print_map_counts("replay_reasons", &summary.replay_reasons);
     } else {
-        println!("bottlenecks:");
-        for (reason, count) in &summary.bottlenecks {
-            println!("  {reason}: {count}");
-        }
-    }
-
-    if summary.top_bottlenecks.is_empty() {
-        println!("top_bottlenecks: none");
-    } else {
-        println!("top_bottlenecks:");
-        for entry in &summary.top_bottlenecks {
-            println!("  {}: {}", entry.key, entry.count);
-        }
-    }
-
-    if summary.flush_reasons.is_empty() {
-        println!("flush_reasons: none");
-    } else {
-        println!("flush_reasons:");
-        for (reason, count) in &summary.flush_reasons {
-            println!("  {reason}: {count}");
-        }
-    }
-
-    if summary.replay_reasons.is_empty() {
-        println!("replay_reasons: none");
-    } else {
-        println!("replay_reasons:");
-        for (reason, count) in &summary.replay_reasons {
-            println!("  {reason}: {count}");
-        }
+        println!("experimental_bottleneck_analysis: disabled");
     }
 
     if summary.status_counts.is_empty() {
@@ -202,6 +216,18 @@ fn print_report(path: &Path, summary: &Summary) {
             println!("  average: {:.3}", latency.average);
         }
         None => println!("retired_latency: none"),
+    }
+}
+
+fn print_map_counts(label: &str, counts: &std::collections::BTreeMap<String, u64>) {
+    if counts.is_empty() {
+        println!("{label}: none");
+        return;
+    }
+
+    println!("{label}:");
+    for (key, count) in counts {
+        println!("  {key}: {count}");
     }
 }
 

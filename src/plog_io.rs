@@ -5,12 +5,19 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use crate::konata::{parse_konata_preview_reader, parse_konata_reader};
 use crate::model::Trace;
-use crate::parser::parse_plog_reader;
+use crate::parser::{parse_plog_preview_reader, parse_plog_reader};
 
 const ZSTD_EXTENSION: &str = "zst";
 const ZSTD_LEVEL: i32 = 3;
 pub const DEFAULT_MAX_INPUT_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputFormat {
+    Plog,
+    Konata,
+}
 
 pub fn read_plog_text(path: &Path) -> Result<String> {
     read_plog_text_with_limit(path, DEFAULT_MAX_INPUT_BYTES)
@@ -25,10 +32,67 @@ pub fn read_plog_text_with_limit(path: &Path, max_bytes: u64) -> Result<String> 
 }
 
 pub fn read_plog_trace(path: &Path, max_bytes: u64) -> Result<Trace> {
+    read_trace(path, max_bytes, InputFormat::Plog)
+}
+
+pub fn read_plog_preview_trace(path: &Path, max_bytes: u64, span_limit: usize) -> Result<Trace> {
     if is_zstd_path(path) {
-        read_zstd_trace(path, max_bytes)
+        let input =
+            File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let decoder = zstd::Decoder::new(input)
+            .with_context(|| format!("failed to decode {}", path.display()))?;
+        let reader = BufReader::new(LimitedReader::new(decoder, max_bytes, path));
+        parse_plog_preview_reader(reader, span_limit)
+            .with_context(|| format!("failed to parse {}", path.display()))
     } else {
-        read_plain_trace(path, max_bytes)
+        check_plain_size(path, max_bytes)?;
+        let input =
+            File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let reader = BufReader::new(LimitedReader::new(input, max_bytes, path));
+        parse_plog_preview_reader(reader, span_limit)
+            .with_context(|| format!("failed to parse {}", path.display()))
+    }
+}
+
+pub fn read_trace(path: &Path, max_bytes: u64, format: InputFormat) -> Result<Trace> {
+    if is_zstd_path(path) {
+        read_zstd_trace(path, max_bytes, format)
+    } else {
+        read_plain_trace(path, max_bytes, format)
+    }
+}
+
+pub fn read_konata_trace(path: &Path, max_bytes: u64) -> Result<Trace> {
+    read_trace(path, max_bytes, InputFormat::Konata)
+}
+
+pub fn read_konata_preview_trace(
+    path: &Path,
+    max_bytes: u64,
+    instruction_limit: usize,
+) -> Result<Trace> {
+    if is_zstd_path(path) {
+        let input =
+            File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let decoder = zstd::Decoder::new(input)
+            .with_context(|| format!("failed to decode {}", path.display()))?;
+        let reader = BufReader::new(LimitedReader::new(decoder, max_bytes, path));
+        parse_konata_preview_reader(reader, instruction_limit)
+            .with_context(|| format!("failed to parse {}", path.display()))
+    } else {
+        check_plain_size(path, max_bytes)?;
+        let input =
+            File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
+        let reader = BufReader::new(LimitedReader::new(input, max_bytes, path));
+        parse_konata_preview_reader(reader, instruction_limit)
+            .with_context(|| format!("failed to parse {}", path.display()))
+    }
+}
+
+fn parse_reader<R: std::io::BufRead>(reader: R, format: InputFormat) -> Result<Trace> {
+    match format {
+        InputFormat::Plog => parse_plog_reader(reader).map_err(Into::into),
+        InputFormat::Konata => parse_konata_reader(reader).map_err(Into::into),
     }
 }
 
@@ -65,12 +129,12 @@ fn read_plain_text(path: &Path, max_bytes: u64) -> Result<String> {
     read_limited_utf8(input, max_bytes, path, "read")
 }
 
-fn read_plain_trace(path: &Path, max_bytes: u64) -> Result<Trace> {
+fn read_plain_trace(path: &Path, max_bytes: u64, format: InputFormat) -> Result<Trace> {
     check_plain_size(path, max_bytes)?;
 
     let input = File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
     let reader = BufReader::new(LimitedReader::new(input, max_bytes, path));
-    parse_plog_reader(reader).with_context(|| format!("failed to parse {}", path.display()))
+    parse_reader(reader, format).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 fn read_zstd_text(path: &Path, max_bytes: u64) -> Result<String> {
@@ -80,12 +144,12 @@ fn read_zstd_text(path: &Path, max_bytes: u64) -> Result<String> {
     read_limited_utf8(&mut decoder, max_bytes, path, "read decoded text from")
 }
 
-fn read_zstd_trace(path: &Path, max_bytes: u64) -> Result<Trace> {
+fn read_zstd_trace(path: &Path, max_bytes: u64, format: InputFormat) -> Result<Trace> {
     let input = File::open(path).with_context(|| format!("failed to read {}", path.display()))?;
     let decoder = zstd::Decoder::new(input)
         .with_context(|| format!("failed to decode {}", path.display()))?;
     let reader = BufReader::new(LimitedReader::new(decoder, max_bytes, path));
-    parse_plog_reader(reader).with_context(|| format!("failed to parse {}", path.display()))
+    parse_reader(reader, format).with_context(|| format!("failed to parse {}", path.display()))
 }
 
 fn check_plain_size(path: &Path, max_bytes: u64) -> Result<()> {
