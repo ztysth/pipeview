@@ -1,10 +1,12 @@
 use std::collections::BTreeMap;
 use std::io;
 use std::path::Path;
-use std::time::Duration;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
-use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture};
+use anyhow::{Context, Result, anyhow, bail};
+use crossterm::event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -19,6 +21,7 @@ use serde::Deserialize;
 
 use crate::analysis::{Summary, summarize};
 use crate::model::{Instruction, KeyValue, RetireEvent, Span as ModelSpan, Stage, Trace};
+use crate::plog_io::read_plog_trace;
 
 mod keys;
 pub use keys::parse_jump_target;
@@ -341,6 +344,48 @@ pub fn run(path: &Path, trace: Trace, theme: Theme) -> Result<()> {
     result
 }
 
+pub fn run_path(path: &Path, theme: Theme, max_input_bytes: u64) -> Result<()> {
+    let mut terminal = TerminalSession::start()?;
+    let (sender, receiver) = mpsc::channel();
+    let path_buf = path.to_path_buf();
+    let started_at = Instant::now();
+
+    thread::spawn(move || {
+        let result = read_plog_trace(&path_buf, max_input_bytes);
+        let _ = sender.send(result);
+    });
+
+    let result = loop {
+        match receiver.try_recv() {
+            Ok(Ok(trace)) => {
+                let mut app = App::new(path, trace, theme);
+                break run_loop(terminal.terminal(), &mut app);
+            }
+            Ok(Err(error)) => break Err(error),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                break Err(anyhow!("PLog loader stopped unexpectedly"));
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+
+        terminal
+            .terminal()
+            .draw(|frame| render_loading(frame, path, started_at.elapsed()))?;
+
+        if event::poll(Duration::from_millis(100))?
+            && matches!(
+                event::read()?,
+                Event::Key(key) if matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
+            )
+        {
+            break Ok(());
+        }
+    };
+
+    terminal.restore()?;
+    result
+}
+
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
         terminal.draw(|frame| render(frame, app))?;
@@ -351,6 +396,19 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
     }
 
     Ok(())
+}
+
+fn render_loading(frame: &mut ratatui::Frame<'_>, path: &Path, elapsed: Duration) {
+    let area = frame.area();
+    let lines = vec![
+        Line::from(format!("loading: {}", path.display())),
+        Line::from(format!("elapsed: {:.1}s", elapsed.as_secs_f32())),
+        Line::from("Esc/q: cancel"),
+    ];
+    let block = Paragraph::new(lines)
+        .style(Style::default().bg(Color::Black).fg(Color::White))
+        .block(Block::default().title("Loading PLog").borders(Borders::ALL));
+    frame.render_widget(block, centered_rect(area, 78, 7));
 }
 
 fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
@@ -606,8 +664,19 @@ fn render_info_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         .selected_row()
         .map(|row| format!("selected: {}", row.label))
         .unwrap_or_else(|| "selected: none".to_owned());
+    let selected_cycle = app
+        .selected_row()
+        .and_then(|row| timeline_cell_at(row, app.cycle_offset))
+        .map(|cell| {
+            format!(
+                "cycle {}: {} lane={}",
+                app.cycle_offset, cell.stage, cell.lane
+            )
+        })
+        .unwrap_or_else(|| format!("cycle {}: empty", app.cycle_offset));
     let lines = vec![
         Line::from(selected),
+        Line::from(selected_cycle),
         Line::from(format!(
             "row: {} / {}    cycle offset: {}    zoom: {}",
             app.selected_row + 1,
@@ -616,14 +685,17 @@ fn render_info_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
             app.cell_width
         )),
         Line::from(format!(
-            "instructions: {}  retired: {}  spans: {}  IPC: {}",
+            "instructions: {}  retired: {}  spans: {}  cycles: {}  IPC: {}",
             app.summary.instruction_count,
             app.summary.retired_count,
             app.summary.span_count,
+            app.summary.cycle_count,
             app.summary
                 .ipc
                 .map_or_else(|| "n/a".to_owned(), |ipc| format!("{ipc:.3}"))
         )),
+        Line::from(format_span_stats("stages", &app.summary.stage_stats)),
+        Line::from(format_span_stats("lanes", &app.summary.lane_stats)),
         Line::from(format_count_entries("top", &app.summary.top_bottlenecks)),
         Line::from(format_map_counts("stalls", &app.summary.stall_reasons)),
         Line::from(format_map_counts("flush", &app.summary.flush_reasons)),
@@ -780,6 +852,25 @@ fn format_map_counts(label: &str, counts: &BTreeMap<String, u64>) -> String {
         .iter()
         .take(4)
         .map(|(key, count)| format!("{key}={count}"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{label}: {values}")
+}
+
+fn format_span_stats(label: &str, stats: &BTreeMap<String, crate::analysis::SpanStats>) -> String {
+    if stats.is_empty() {
+        return format!("{label}: none");
+    }
+
+    let values = stats
+        .iter()
+        .take(4)
+        .map(|(key, value)| {
+            format!(
+                "{key}=total:{} avg:{:.1}",
+                value.total_cycles, value.average_duration
+            )
+        })
         .collect::<Vec<_>>()
         .join(" ");
     format!("{label}: {values}")
