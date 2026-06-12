@@ -4,6 +4,14 @@
 
 `pipeview` 是一个使用Rust编写的终端流水线可视化工具.
 
+## Preview
+
+Pipeline timeline view:
+
+流水线时间线视图:
+
+![pipeview timeline preview](img/screenshot.png)
+
 ## Usage
 
 Open a PLog file in the terminal timeline view:
