@@ -3,8 +3,16 @@ name: Release
 on:
   workflow_dispatch:
   push:
+    branches:
+      - master
+      - main
     tags:
       - "v*"
+    paths-ignore:
+      - "README.md"
+      - "docs/**"
+      - "img/**"
+      - "examples/**"
 
 env:
   CARGO_TERM_COLOR: always
@@ -107,4 +115,10 @@ jobs:
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz --generate-notes
+        run: |
+          set -euo pipefail
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" dist/*.tar.gz --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz --generate-notes
+          fi
