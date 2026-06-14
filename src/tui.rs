@@ -279,6 +279,18 @@ impl App {
             .and_then(|row| self.detail_cache.get(&row.inst_id))
     }
 
+    fn preserve_view_state_from(&mut self, previous: &Self) {
+        self.selected_row = previous.selected_row.min(self.rows.len().saturating_sub(1));
+        self.cycle_offset = previous.cycle_offset;
+        self.cell_width = previous.cell_width;
+        self.overlay = previous.overlay;
+        self.jump_input.clone_from(&previous.jump_input);
+
+        if self.overlay == Overlay::Detail {
+            self.ensure_selected_detail();
+        }
+    }
+
     pub(super) fn ensure_selected_detail(&mut self) {
         let Some(inst_id) = self.selected_row().map(|row| row.inst_id) else {
             return;
@@ -433,6 +445,10 @@ pub fn run_path(
         match receiver.try_recv() {
             Ok(Ok(trace)) => {
                 let mut app = App::new(path, trace, theme, summary_options);
+                if let Some(preview) = preview_app.as_ref() {
+                    app.preserve_view_state_from(preview);
+                    app.status = "full trace loaded".to_owned();
+                }
                 if profile_exit {
                     terminal.terminal().draw(|frame| render(frame, &app))?;
                     profile_line = Some(format!(
@@ -1507,5 +1523,73 @@ impl TerminalSession {
 impl Drop for TerminalSession {
     fn drop(&mut self) {
         let _ = self.restore();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use crate::analysis::SummaryOptions;
+    use crate::parser::parse_plog;
+
+    use super::{App, ColorMode, Overlay, Theme};
+
+    #[test]
+    fn full_trace_preserves_preview_view_state() {
+        let path = Path::new("trace.plog");
+        let options = SummaryOptions::default();
+        let mut preview = App::new(
+            path,
+            parse_plog(concat!(
+                "PLOG\t1\n",
+                "STAGE\tIF\tFetch\n",
+                "STAGE\tID\tDecode\n",
+                "LANE\tmain\tMain\n",
+                "I\t1\tpc=0x1000\n",
+                "I\t2\tpc=0x1004\n",
+                "B\t10\t1\t1\tmain\tIF\n",
+                "B\t42\t1\t2\tmain\tID\n",
+            ))
+            .expect("preview trace parses"),
+            Theme::new(ColorMode::Default),
+            options,
+        );
+        preview.move_down();
+        preview.cycle_offset = 42;
+        preview.cell_width = 11;
+        preview.overlay = Overlay::Detail;
+        preview.jump_input = "2,42".to_owned();
+        preview.ensure_selected_detail();
+
+        let mut full = App::new(
+            path,
+            parse_plog(concat!(
+                "PLOG\t1\n",
+                "STAGE\tIF\tFetch\n",
+                "STAGE\tID\tDecode\n",
+                "STAGE\tEX\tExecute\n",
+                "LANE\tmain\tMain\n",
+                "I\t1\tpc=0x1000\n",
+                "I\t2\tpc=0x1004\n",
+                "I\t3\tpc=0x1008\n",
+                "B\t10\t1\t1\tmain\tIF\n",
+                "B\t42\t1\t2\tmain\tID\n",
+                "B\t44\t1\t2\tmain\tEX\n",
+                "B\t50\t1\t3\tmain\tIF\n",
+            ))
+            .expect("full trace parses"),
+            Theme::new(ColorMode::Default),
+            options,
+        );
+
+        full.preserve_view_state_from(&preview);
+
+        assert_eq!(full.selected_row, 1);
+        assert_eq!(full.cycle_offset, 42);
+        assert_eq!(full.cell_width, 11);
+        assert_eq!(full.overlay, Overlay::Detail);
+        assert_eq!(full.jump_input, "2,42");
+        assert_eq!(full.selected_detail().expect("detail preserved").inst_id, 2);
     }
 }
