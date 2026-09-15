@@ -1,16 +1,10 @@
 use std::io::BufRead;
-
-use nom::Parser;
-use nom::bytes::complete::{tag, take_till, take_till1};
-use nom::character::complete::{char, digit1};
-use nom::combinator::{all_consuming, map_res};
-use nom::multi::separated_list1;
-use nom::sequence::separated_pair;
-use nom::{IResult, error::ErrorKind};
+use std::str::Split;
 
 use crate::error::{ParseError, ValidationError};
 use crate::model::{
-    AttrMap, Counter, Event, Instruction, KeyValue, Lane, RetireEvent, Span, Stage, Trace,
+    AttrMap, Counter, Event, Instruction, KeyValue, Lane, RetireEvent, Span, SpanNames, Stage,
+    Trace,
 };
 use crate::validate::validate_trace;
 
@@ -21,16 +15,16 @@ enum RawRecord<'a> {
     Stage {
         id: &'a str,
         label: &'a str,
-        attrs: Vec<RawKeyValue<'a>>,
+        attrs: AttrMap,
     },
     Lane {
         id: &'a str,
         label: &'a str,
-        attrs: Vec<RawKeyValue<'a>>,
+        attrs: AttrMap,
     },
     Instruction {
         inst_id: u64,
-        attrs: Vec<RawKeyValue<'a>>,
+        attrs: AttrMap,
     },
     Span {
         cycle: u64,
@@ -38,44 +32,47 @@ enum RawRecord<'a> {
         inst_id: u64,
         lane: &'a str,
         stage: &'a str,
-        attrs: Vec<RawKeyValue<'a>>,
+        attrs: AttrMap,
     },
     Event {
         cycle: u64,
         inst_id: u64,
         event: &'a str,
-        attrs: Vec<RawKeyValue<'a>>,
+        attrs: AttrMap,
     },
     Counter {
         cycle: u64,
         resource: &'a str,
-        attrs: Vec<RawKeyValue<'a>>,
+        attrs: AttrMap,
     },
     Retire {
         cycle: u64,
         inst_id: u64,
         status: &'a str,
-        attrs: Vec<RawKeyValue<'a>>,
+        attrs: AttrMap,
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RawKeyValue<'a> {
-    key: &'a str,
-    value: &'a str,
-}
+type Fields<'a> = Split<'a, char>;
 
 pub fn parse_plog(input: &str) -> Result<Trace, ParseError> {
     if input.is_empty() {
         return Err(ParseError::EmptyInput);
     }
 
-    parse_lines(input.lines().enumerate().map(|(index, line)| {
-        Ok((
-            index + 1,
-            line.strip_suffix('\r').unwrap_or(line).to_owned(),
-        ))
-    }))
+    let mut builder = TraceBuilder::default();
+    let mut saw_line = false;
+
+    for (index, line) in input.lines().enumerate() {
+        saw_line = true;
+        builder.push_line(index + 1, line.strip_suffix('\r').unwrap_or(line))?;
+    }
+
+    if !saw_line {
+        return Err(ParseError::EmptyInput);
+    }
+
+    builder.finish()
 }
 
 pub fn parse_plog_reader<R: BufRead>(reader: R) -> Result<Trace, ParseError> {
@@ -90,40 +87,29 @@ pub fn parse_plog_preview_reader<R: BufRead>(
 }
 
 fn parse_plog_reader_with_limit<R: BufRead>(
-    reader: R,
+    mut reader: R,
     span_limit: Option<usize>,
 ) -> Result<Trace, ParseError> {
-    let lines = reader.lines().enumerate().map(|(index, line)| {
-        line.map(|line| {
-            (
-                index + 1,
-                line.strip_suffix('\r').unwrap_or(&line).to_owned(),
-            )
-        })
-        .map_err(|error| ParseError::line(index + 1, error.to_string()))
-    });
-
-    parse_lines_with_limit(lines, span_limit)
-}
-
-fn parse_lines<I>(lines: I) -> Result<Trace, ParseError>
-where
-    I: IntoIterator<Item = Result<(usize, String), ParseError>>,
-{
-    parse_lines_with_limit(lines, None)
-}
-
-fn parse_lines_with_limit<I>(lines: I, span_limit: Option<usize>) -> Result<Trace, ParseError>
-where
-    I: IntoIterator<Item = Result<(usize, String), ParseError>>,
-{
     let mut builder = TraceBuilder::default();
+    let mut buffer = String::new();
+    let mut line_number = 0;
     let mut saw_line = false;
-    for line in lines {
-        let (line_number, line) = line?;
+
+    loop {
+        buffer.clear();
+        line_number += 1;
+        let read = reader
+            .read_line(&mut buffer)
+            .map_err(|error| ParseError::line(line_number, error.to_string()))?;
+        if read == 0 {
+            break;
+        }
+
         saw_line = true;
-        let record = parse_line(&line).map_err(|message| ParseError::line(line_number, message))?;
-        builder.push(record)?;
+        let line = buffer.strip_suffix('\n').unwrap_or(&buffer);
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        builder.push_line(line_number, line)?;
+
         if span_limit.is_some_and(|limit| builder.spans.len() >= limit) {
             break;
         }
@@ -141,185 +127,218 @@ where
 }
 
 fn parse_line(line: &str) -> Result<RawRecord<'_>, String> {
-    let (_, fields) = all_consuming(separated_list1(tag("\t"), field))
-        .parse(line)
-        .map_err(|_| "malformed tab-separated record".to_string())?;
+    if line.contains('\n') || line.contains('\r') {
+        return Err("malformed tab-separated record".to_string());
+    }
 
-    let Some(kind) = fields.first() else {
+    let mut fields = line.split('\t');
+    let Some(kind) = fields.next() else {
         return Err("empty record".to_string());
     };
 
-    match *kind {
-        "PLOG" => parse_header_fields(&fields),
-        "META" => parse_meta_fields(&fields),
-        "STAGE" => parse_stage_fields(&fields),
-        "LANE" => parse_lane_fields(&fields),
-        "I" => parse_instruction_fields(&fields),
-        "B" => parse_span_fields(&fields),
-        "E" => parse_event_fields(&fields),
-        "C" => parse_counter_fields(&fields),
-        "R" => parse_retire_fields(&fields),
+    match kind {
+        "PLOG" => parse_header_fields(line, &mut fields),
+        "META" => parse_meta_fields(line, &mut fields),
+        "STAGE" => parse_stage_fields(line, &mut fields),
+        "LANE" => parse_lane_fields(line, &mut fields),
+        "I" => parse_instruction_fields(line, &mut fields),
+        "B" => parse_span_fields(line, &mut fields),
+        "E" => parse_event_fields(line, &mut fields),
+        "C" => parse_counter_fields(line, &mut fields),
+        "R" => parse_retire_fields(line, &mut fields),
         other => Err(format!("unknown record kind `{other}`")),
     }
 }
 
-fn field(input: &str) -> IResult<&str, &str> {
-    take_till(|c| c == '\t' || c == '\n' || c == '\r')(input)
+fn parse_header_fields<'a>(line: &str, fields: &mut Fields<'a>) -> Result<RawRecord<'a>, String> {
+    let version = take_exact(line, fields, 2, "PLOG")?;
+    require_no_extra_fields(line, fields, 2, "PLOG")?;
+    Ok(RawRecord::Header(parse_u32(version, "version")?))
 }
 
-fn parse_header_fields<'a>(fields: &[&'a str]) -> Result<RawRecord<'a>, String> {
-    require_field_count(fields, 2, "PLOG")?;
-    Ok(RawRecord::Header(parse_u32(fields[1], "version")?))
+fn parse_meta_fields<'a>(line: &str, fields: &mut Fields<'a>) -> Result<RawRecord<'a>, String> {
+    let key = take_exact(line, fields, 3, "META")?;
+    let value = take_exact(line, fields, 3, "META")?;
+    require_no_extra_fields(line, fields, 3, "META")?;
+    require_non_empty(key, "metadata key")?;
+    Ok(RawRecord::Meta(key, value))
 }
 
-fn parse_meta_fields<'a>(fields: &[&'a str]) -> Result<RawRecord<'a>, String> {
-    require_field_count(fields, 3, "META")?;
-    require_non_empty(fields[1], "metadata key")?;
-    Ok(RawRecord::Meta(fields[1], fields[2]))
-}
-
-fn parse_stage_fields<'a>(fields: &[&'a str]) -> Result<RawRecord<'a>, String> {
-    require_min_field_count(fields, 3, "STAGE")?;
-    require_non_empty(fields[1], "stage id")?;
-    require_non_empty(fields[2], "stage label")?;
+fn parse_stage_fields<'a>(line: &str, fields: &mut Fields<'a>) -> Result<RawRecord<'a>, String> {
+    let id = take_at_least(line, fields, 3, "STAGE")?;
+    let label = take_at_least(line, fields, 3, "STAGE")?;
+    require_non_empty(id, "stage id")?;
+    require_non_empty(label, "stage label")?;
     Ok(RawRecord::Stage {
-        id: fields[1],
-        label: fields[2],
-        attrs: parse_attrs(&fields[3..])?,
+        id,
+        label,
+        attrs: parse_attrs(fields)?,
     })
 }
 
-fn parse_lane_fields<'a>(fields: &[&'a str]) -> Result<RawRecord<'a>, String> {
-    require_min_field_count(fields, 3, "LANE")?;
-    require_non_empty(fields[1], "lane id")?;
-    require_non_empty(fields[2], "lane label")?;
+fn parse_lane_fields<'a>(line: &str, fields: &mut Fields<'a>) -> Result<RawRecord<'a>, String> {
+    let id = take_at_least(line, fields, 3, "LANE")?;
+    let label = take_at_least(line, fields, 3, "LANE")?;
+    require_non_empty(id, "lane id")?;
+    require_non_empty(label, "lane label")?;
     Ok(RawRecord::Lane {
-        id: fields[1],
-        label: fields[2],
-        attrs: parse_attrs(&fields[3..])?,
+        id,
+        label,
+        attrs: parse_attrs(fields)?,
     })
 }
 
-fn parse_instruction_fields<'a>(fields: &[&'a str]) -> Result<RawRecord<'a>, String> {
-    require_min_field_count(fields, 2, "I")?;
+fn parse_instruction_fields<'a>(
+    line: &str,
+    fields: &mut Fields<'a>,
+) -> Result<RawRecord<'a>, String> {
+    let inst_id = take_at_least(line, fields, 2, "I")?;
     Ok(RawRecord::Instruction {
-        inst_id: parse_u64(fields[1], "instruction id")?,
-        attrs: parse_attrs(&fields[2..])?,
+        inst_id: parse_u64(inst_id, "instruction id")?,
+        attrs: parse_attrs(fields)?,
     })
 }
 
-fn parse_span_fields<'a>(fields: &[&'a str]) -> Result<RawRecord<'a>, String> {
-    require_min_field_count(fields, 6, "B")?;
-    require_non_empty(fields[4], "lane id")?;
-    require_non_empty(fields[5], "stage id")?;
+fn parse_span_fields<'a>(line: &str, fields: &mut Fields<'a>) -> Result<RawRecord<'a>, String> {
+    let cycle = take_at_least(line, fields, 6, "B")?;
+    let duration = take_at_least(line, fields, 6, "B")?;
+    let inst_id = take_at_least(line, fields, 6, "B")?;
+    let lane = take_at_least(line, fields, 6, "B")?;
+    let stage = take_at_least(line, fields, 6, "B")?;
+    require_non_empty(lane, "lane id")?;
+    require_non_empty(stage, "stage id")?;
     Ok(RawRecord::Span {
-        cycle: parse_u64(fields[1], "cycle")?,
-        duration: parse_u64(fields[2], "duration")?,
-        inst_id: parse_u64(fields[3], "instruction id")?,
-        lane: fields[4],
-        stage: fields[5],
-        attrs: parse_attrs(&fields[6..])?,
+        cycle: parse_u64(cycle, "cycle")?,
+        duration: parse_u64(duration, "duration")?,
+        inst_id: parse_u64(inst_id, "instruction id")?,
+        lane,
+        stage,
+        attrs: parse_attrs(fields)?,
     })
 }
 
-fn parse_event_fields<'a>(fields: &[&'a str]) -> Result<RawRecord<'a>, String> {
-    require_min_field_count(fields, 4, "E")?;
-    require_non_empty(fields[3], "event")?;
+fn parse_event_fields<'a>(line: &str, fields: &mut Fields<'a>) -> Result<RawRecord<'a>, String> {
+    let cycle = take_at_least(line, fields, 4, "E")?;
+    let inst_id = take_at_least(line, fields, 4, "E")?;
+    let event = take_at_least(line, fields, 4, "E")?;
+    require_non_empty(event, "event")?;
     Ok(RawRecord::Event {
-        cycle: parse_u64(fields[1], "cycle")?,
-        inst_id: parse_u64(fields[2], "instruction id")?,
-        event: fields[3],
-        attrs: parse_attrs(&fields[4..])?,
+        cycle: parse_u64(cycle, "cycle")?,
+        inst_id: parse_u64(inst_id, "instruction id")?,
+        event,
+        attrs: parse_attrs(fields)?,
     })
 }
 
-fn parse_counter_fields<'a>(fields: &[&'a str]) -> Result<RawRecord<'a>, String> {
-    require_min_field_count(fields, 3, "C")?;
-    require_non_empty(fields[2], "resource")?;
+fn parse_counter_fields<'a>(line: &str, fields: &mut Fields<'a>) -> Result<RawRecord<'a>, String> {
+    let cycle = take_at_least(line, fields, 3, "C")?;
+    let resource = take_at_least(line, fields, 3, "C")?;
+    require_non_empty(resource, "resource")?;
     Ok(RawRecord::Counter {
-        cycle: parse_u64(fields[1], "cycle")?,
-        resource: fields[2],
-        attrs: parse_attrs(&fields[3..])?,
+        cycle: parse_u64(cycle, "cycle")?,
+        resource,
+        attrs: parse_attrs(fields)?,
     })
 }
 
-fn parse_retire_fields<'a>(fields: &[&'a str]) -> Result<RawRecord<'a>, String> {
-    require_min_field_count(fields, 4, "R")?;
-    require_non_empty(fields[3], "status")?;
+fn parse_retire_fields<'a>(line: &str, fields: &mut Fields<'a>) -> Result<RawRecord<'a>, String> {
+    let cycle = take_at_least(line, fields, 4, "R")?;
+    let inst_id = take_at_least(line, fields, 4, "R")?;
+    let status = take_at_least(line, fields, 4, "R")?;
+    require_non_empty(status, "status")?;
     Ok(RawRecord::Retire {
-        cycle: parse_u64(fields[1], "cycle")?,
-        inst_id: parse_u64(fields[2], "instruction id")?,
-        status: fields[3],
-        attrs: parse_attrs(&fields[4..])?,
+        cycle: parse_u64(cycle, "cycle")?,
+        inst_id: parse_u64(inst_id, "instruction id")?,
+        status,
+        attrs: parse_attrs(fields)?,
     })
 }
 
-fn parse_attrs<'a>(fields: &[&'a str]) -> Result<Vec<RawKeyValue<'a>>, String> {
+fn parse_attrs<'a, I>(fields: I) -> Result<AttrMap, String>
+where
+    I: Iterator<Item = &'a str>,
+{
     fields
-        .iter()
-        .map(|field| {
-            let (_, attr) = all_consuming(parse_key_value)
-                .parse(field)
-                .map_err(|_| format!("malformed key/value attribute `{field}`"))?;
-            Ok(attr)
+        .map(|field| match field.split_once('=') {
+            Some((key, value)) if !key.is_empty() && !value.is_empty() => Ok(KeyValue {
+                key: key.to_owned(),
+                value: value.to_owned(),
+            }),
+            _ => Err(format!("malformed key/value attribute `{field}`")),
         })
         .collect()
 }
 
-fn parse_key_value(input: &str) -> IResult<&str, RawKeyValue<'_>> {
-    let (remaining, (key, value)) = separated_pair(
-        take_till1(|c| c == '=' || c == '\t' || c == '\n' || c == '\r'),
-        char('='),
-        take_till(|c| c == '\t' || c == '\n' || c == '\r'),
-    )
-    .parse(input)?;
-
-    if value.is_empty() {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            ErrorKind::TakeTill1,
-        )));
-    }
-
-    Ok((remaining, RawKeyValue { key, value }))
-}
-
 fn parse_u32(input: &str, label: &str) -> Result<u32, String> {
-    parse_number(input).map_err(|_| format!("invalid {label} `{input}`"))
+    parse_number(input).ok_or_else(|| format!("invalid {label} `{input}`"))
 }
 
 fn parse_u64(input: &str, label: &str) -> Result<u64, String> {
-    parse_number(input).map_err(|_| format!("invalid {label} `{input}`"))
+    parse_number(input).ok_or_else(|| format!("invalid {label} `{input}`"))
 }
 
-fn parse_number<T>(input: &str) -> Result<T, nom::Err<nom::error::Error<&str>>>
+fn parse_number<T>(input: &str) -> Option<T>
 where
     T: std::str::FromStr,
 {
-    let (_, number) = all_consuming(map_res(digit1, str::parse)).parse(input)?;
-    Ok(number)
+    if input.is_empty() || !input.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    input.parse().ok()
 }
 
-fn require_field_count(fields: &[&str], expected: usize, kind: &str) -> Result<(), String> {
-    if fields.len() == expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "{kind} record expects {expected} fields, got {}",
-            fields.len()
-        ))
-    }
+fn take_exact<'a>(
+    line: &str,
+    fields: &mut Fields<'a>,
+    expected: usize,
+    kind: &str,
+) -> Result<&'a str, String> {
+    fields
+        .next()
+        .ok_or_else(|| exact_field_count_error(line, expected, kind))
 }
 
-fn require_min_field_count(fields: &[&str], expected: usize, kind: &str) -> Result<(), String> {
-    if fields.len() >= expected {
-        Ok(())
-    } else {
-        Err(format!(
-            "{kind} record expects at least {expected} fields, got {}",
-            fields.len()
-        ))
+fn require_no_extra_fields(
+    line: &str,
+    fields: &mut Fields<'_>,
+    expected: usize,
+    kind: &str,
+) -> Result<(), String> {
+    if fields.next().is_some() {
+        return Err(exact_field_count_error(line, expected, kind));
     }
+
+    Ok(())
+}
+
+fn take_at_least<'a>(
+    line: &str,
+    fields: &mut Fields<'a>,
+    expected: usize,
+    kind: &str,
+) -> Result<&'a str, String> {
+    fields
+        .next()
+        .ok_or_else(|| min_field_count_error(line, expected, kind))
+}
+
+fn exact_field_count_error(line: &str, expected: usize, kind: &str) -> String {
+    format!(
+        "{kind} record expects {expected} fields, got {}",
+        field_count(line)
+    )
+}
+
+fn min_field_count_error(line: &str, expected: usize, kind: &str) -> String {
+    format!(
+        "{kind} record expects at least {expected} fields, got {}",
+        field_count(line)
+    )
+}
+
+fn field_count(line: &str) -> usize {
+    line.split('\t').count()
 }
 
 fn require_non_empty(value: &str, label: &str) -> Result<(), String> {
@@ -332,6 +351,7 @@ fn require_non_empty(value: &str, label: &str) -> Result<(), String> {
 
 #[derive(Default)]
 struct TraceBuilder {
+    span_names: SpanNames,
     version: Option<u32>,
     meta: Vec<KeyValue>,
     stages: Vec<Stage>,
@@ -344,6 +364,11 @@ struct TraceBuilder {
 }
 
 impl TraceBuilder {
+    fn push_line(&mut self, line_number: usize, line: &str) -> Result<(), ParseError> {
+        let record = parse_line(line).map_err(|message| ParseError::line(line_number, message))?;
+        self.push(record)
+    }
+
     fn push(&mut self, record: RawRecord<'_>) -> Result<(), ParseError> {
         match record {
             RawRecord::Header(record_version) => {
@@ -358,17 +383,16 @@ impl TraceBuilder {
             RawRecord::Stage { id, label, attrs } => self.stages.push(Stage {
                 id: id.to_owned(),
                 label: label.to_owned(),
-                attrs: own_attrs(attrs),
+                attrs,
             }),
             RawRecord::Lane { id, label, attrs } => self.lanes.push(Lane {
                 id: id.to_owned(),
                 label: label.to_owned(),
-                attrs: own_attrs(attrs),
+                attrs,
             }),
-            RawRecord::Instruction { inst_id, attrs } => self.instructions.push(Instruction {
-                inst_id,
-                attrs: own_attrs(attrs),
-            }),
+            RawRecord::Instruction { inst_id, attrs } => {
+                self.instructions.push(Instruction { inst_id, attrs })
+            }
             RawRecord::Span {
                 cycle,
                 duration,
@@ -380,9 +404,9 @@ impl TraceBuilder {
                 cycle,
                 duration,
                 inst_id,
-                lane: lane.to_owned(),
-                stage: stage.to_owned(),
-                attrs: own_attrs(attrs),
+                lane: self.span_names.intern(lane),
+                stage: self.span_names.intern(stage),
+                attrs,
             }),
             RawRecord::Event {
                 cycle,
@@ -393,7 +417,7 @@ impl TraceBuilder {
                 cycle,
                 inst_id,
                 event: event.to_owned(),
-                attrs: own_attrs(attrs),
+                attrs,
             }),
             RawRecord::Counter {
                 cycle,
@@ -402,7 +426,7 @@ impl TraceBuilder {
             } => self.counters.push(Counter {
                 cycle,
                 resource: resource.to_owned(),
-                attrs: own_attrs(attrs),
+                attrs,
             }),
             RawRecord::Retire {
                 cycle,
@@ -413,7 +437,7 @@ impl TraceBuilder {
                 cycle,
                 inst_id,
                 status: status.to_owned(),
-                attrs: own_attrs(attrs),
+                attrs,
             }),
         }
 
@@ -450,16 +474,6 @@ impl TraceBuilder {
             retires: self.retires,
         })
     }
-}
-
-fn own_attrs(attrs: Vec<RawKeyValue<'_>>) -> AttrMap {
-    attrs
-        .into_iter()
-        .map(|attr| KeyValue {
-            key: attr.key.to_owned(),
-            value: attr.value.to_owned(),
-        })
-        .collect()
 }
 
 #[cfg(test)]

@@ -1,0 +1,66 @@
+variant=user
+parse_ms=2337.873 instructions=1042326 spans=7131750 span_bytes=96
+report_ms=1238.161
+app_ms=804.154
+detail_pct=0 us=0.263
+detail_pct=25 us=0.288
+detail_pct=50 us=0.278
+detail_pct=75 us=0.333
+detail_pct=99 us=0.318
+draw_ms=0.301
+wall_s=4.89 rss_kib=1892056
+variant=after
+parse_ms=1773.284 instructions=1042326 spans=7131750 span_bytes=64
+report_ms=415.655
+app_ms=661.410
+detail_pct=0 us=0.314
+detail_pct=25 us=0.348
+detail_pct=50 us=0.323
+detail_pct=75 us=0.322
+detail_pct=99 us=0.361
+draw_ms=0.270
+wall_s=3.10 rss_kib=1223468
+variant=after
+parse_ms=1901.360 instructions=1042326 spans=7131750 span_bytes=64
+report_ms=403.299
+app_ms=664.702
+detail_pct=0 us=0.318
+detail_pct=25 us=0.357
+detail_pct=50 us=0.333
+detail_pct=75 us=0.339
+detail_pct=99 us=0.352
+draw_ms=0.287
+wall_s=3.22 rss_kib=1223552
+variant=user
+parse_ms=2350.429 instructions=1042326 spans=7131750 span_bytes=96
+report_ms=1299.587
+app_ms=850.424
+detail_pct=0 us=0.282
+detail_pct=25 us=0.301
+detail_pct=50 us=0.282
+detail_pct=75 us=0.294
+detail_pct=99 us=0.318
+draw_ms=0.306
+wall_s=5.05 rss_kib=1892208
+variant=user
+parse_ms=2243.398 instructions=1042326 spans=7131750 span_bytes=96
+report_ms=1297.798
+app_ms=769.581
+detail_pct=0 us=0.272
+detail_pct=25 us=0.291
+detail_pct=50 us=0.274
+detail_pct=75 us=0.268
+detail_pct=99 us=0.295
+draw_ms=0.263
+wall_s=4.81 rss_kib=1892052
+variant=after
+parse_ms=1822.417 instructions=1042326 spans=7131750 span_bytes=64
+report_ms=436.435
+app_ms=665.846
+detail_pct=0 us=0.301
+detail_pct=25 us=0.320
+detail_pct=50 us=0.323
+detail_pct=75 us=0.352
+detail_pct=99 us=0.377
+draw_ms=0.283
+wall_s=3.17 rss_kib=1223552

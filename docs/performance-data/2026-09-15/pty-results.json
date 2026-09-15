@@ -1,0 +1,23 @@
+[
+  {
+    "variant": "user",
+    "interactive": false,
+    "frames": 23,
+    "exit": 0,
+    "terminal_restore": true
+  },
+  {
+    "variant": "after",
+    "interactive": false,
+    "frames": 2,
+    "exit": 0,
+    "terminal_restore": true
+  },
+  {
+    "variant": "after",
+    "interactive": true,
+    "frames": 7,
+    "exit": 0,
+    "terminal_restore": true
+  }
+]

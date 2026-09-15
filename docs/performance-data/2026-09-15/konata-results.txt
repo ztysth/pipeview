@@ -1,0 +1,32 @@
+variant=user
+n=1000 median_ms=1.327 samples=[1.279198, 1.326732, 1.564281]
+n=2000 median_ms=4.276 samples=[4.050247, 4.275593000000001, 4.347199000000001]
+n=4000 median_ms=13.906 samples=[13.447852, 13.905908, 14.779886000000001]
+n=8000 median_ms=52.974 samples=[51.492101, 52.973782, 55.733169]
+n=16000 median_ms=213.535 samples=[206.88073300000002, 213.534898, 218.187502]
+variant=after
+n=1000 median_ms=0.528 samples=[0.512138, 0.5277580000000001, 0.6658980000000001]
+n=2000 median_ms=1.083 samples=[1.076652, 1.0825870000000002, 1.2275470000000002]
+n=4000 median_ms=2.107 samples=[1.9404730000000001, 2.106506, 2.372174]
+n=8000 median_ms=4.247 samples=[4.02785, 4.247135, 5.153203]
+n=16000 median_ms=9.460 samples=[8.950275000000001, 9.460163000000001, 10.729166]
+variant=user fixture=konata-sample-2
+parse_ms=50.371 instructions=20000 spans=90000 span_bytes=96
+report_ms=16.129
+app_ms=9.885
+detail_pct=0 us=0.271
+detail_pct=25 us=0.269
+detail_pct=50 us=0.265
+detail_pct=75 us=0.266
+detail_pct=99 us=0.276
+draw_ms=0.283
+variant=after fixture=konata-sample-2
+parse_ms=47.022 instructions=20000 spans=90000 span_bytes=64
+report_ms=4.542
+app_ms=6.562
+detail_pct=0 us=0.315
+detail_pct=25 us=0.312
+detail_pct=50 us=0.317
+detail_pct=75 us=0.323
+detail_pct=99 us=0.351
+draw_ms=0.277

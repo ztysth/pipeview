@@ -1,28 +1,16 @@
 use std::collections::{HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::io::BufRead;
 
 use crate::error::{ParseError, ValidationError};
-use crate::model::{Instruction, KeyValue, Lane, RetireEvent, Span, Stage, Trace};
+use crate::model::{
+    Instruction, KeyValue, Lane, RetireEvent, Span, SpanName, SpanNames, Stage, Trace,
+};
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ActiveKey {
-    inst_id: u64,
-    lane_id: i64,
-    stage: String,
-}
-
-impl Hash for ActiveKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.inst_id.hash(state);
-        self.lane_id.hash(state);
-        self.stage.hash(state);
-    }
-}
-
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct ActiveStage {
+    lane_id: i64,
     cycle: i64,
+    stage: SpanName,
 }
 
 #[derive(Default)]
@@ -31,8 +19,10 @@ struct KonataBuilder {
     saw_header: bool,
     instructions: HashMap<u64, Instruction>,
     labels: HashMap<u64, Vec<KeyValue>>,
-    active: HashMap<ActiveKey, ActiveStage>,
-    stages: HashSet<String>,
+    active: HashMap<u64, Vec<ActiveStage>>,
+    span_names: SpanNames,
+    lane_names: HashMap<i64, SpanName>,
+    stages: HashSet<SpanName>,
     lanes: HashSet<i64>,
     spans: Vec<Span>,
     retires: Vec<RetireEvent>,
@@ -176,32 +166,31 @@ impl KonataBuilder {
                     "instruction id",
                 )?;
                 let lane_id = parse_i64(next_field(&mut fields, "S", "lane id")?, "lane id")?;
-                let stage = next_field(&mut fields, "S", "stage")?.to_owned();
+                let stage = next_field(&mut fields, "S", "stage")?;
                 ensure_no_more(fields, "S")?;
 
-                self.close_lane(inst_id, lane_id, self.cycle);
+                self.close_stage(inst_id, lane_id, None, self.cycle);
+                let stage = self.span_names.intern(stage);
                 self.stages.insert(stage.clone());
                 self.lanes.insert(lane_id);
-                self.active.insert(
-                    ActiveKey {
-                        inst_id,
-                        lane_id,
-                        stage,
-                    },
-                    ActiveStage { cycle: self.cycle },
-                );
+                self.lane_names
+                    .entry(lane_id)
+                    .or_insert_with(|| lane_name(lane_id).into());
+                self.active.entry(inst_id).or_default().push(ActiveStage {
+                    lane_id,
+                    cycle: self.cycle,
+                    stage,
+                });
             }
             "E" => {
-                let key = ActiveKey {
-                    inst_id: parse_u64(
-                        next_field(&mut fields, "E", "instruction id")?,
-                        "instruction id",
-                    )?,
-                    lane_id: parse_i64(next_field(&mut fields, "E", "lane id")?, "lane id")?,
-                    stage: next_field(&mut fields, "E", "stage")?.to_owned(),
-                };
+                let inst_id = parse_u64(
+                    next_field(&mut fields, "E", "instruction id")?,
+                    "instruction id",
+                )?;
+                let lane_id = parse_i64(next_field(&mut fields, "E", "lane id")?, "lane id")?;
+                let stage = next_field(&mut fields, "E", "stage")?;
                 ensure_no_more(fields, "E")?;
-                self.close_key(&key, self.cycle);
+                self.close_stage(inst_id, lane_id, Some(stage), self.cycle);
             }
             "R" => {
                 let inst_id = parse_u64(
@@ -258,43 +247,42 @@ impl KonataBuilder {
         Ok(())
     }
 
-    fn close_lane(&mut self, inst_id: u64, lane_id: i64, end_cycle: i64) {
-        let keys = self
-            .active
-            .keys()
-            .filter(|key| key.inst_id == inst_id && key.lane_id == lane_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            self.close_key(&key, end_cycle);
+    // Each instruction has at most one active stage per lane. Restrict the
+    // search to that instruction's lanes, independent of the global window.
+    fn close_stage(&mut self, inst_id: u64, lane_id: i64, stage: Option<&str>, end_cycle: i64) {
+        let Some(lanes) = self.active.get_mut(&inst_id) else {
+            return;
+        };
+        let Some(index) = lanes.iter().position(|active| {
+            active.lane_id == lane_id && stage.is_none_or(|name| active.stage == name)
+        }) else {
+            return;
+        };
+        let active = lanes.remove(index);
+        if lanes.is_empty() {
+            self.active.remove(&inst_id);
         }
+        self.finish_stage(inst_id, active, end_cycle);
     }
 
     fn close_instruction(&mut self, inst_id: u64, end_cycle: i64) {
-        let keys = self
-            .active
-            .keys()
-            .filter(|key| key.inst_id == inst_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        for key in keys {
-            self.close_key(&key, end_cycle);
+        if let Some(lanes) = self.active.remove(&inst_id) {
+            for active in lanes {
+                self.finish_stage(inst_id, active, end_cycle);
+            }
         }
     }
 
-    fn close_key(&mut self, key: &ActiveKey, end_cycle: i64) {
-        let Some(active) = self.active.remove(key) else {
-            return;
-        };
+    fn finish_stage(&mut self, inst_id: u64, active: ActiveStage, end_cycle: i64) {
         let start_cycle = cycle_to_u64(active.cycle);
         let end_cycle = cycle_to_u64(end_cycle);
         let duration = end_cycle.saturating_sub(start_cycle).max(1);
         self.spans.push(Span {
             cycle: start_cycle,
             duration,
-            inst_id: key.inst_id,
-            lane: lane_name(key.lane_id),
-            stage: key.stage.clone(),
+            inst_id,
+            lane: self.lane_names[&active.lane_id].clone(),
+            stage: active.stage,
             attrs: Vec::new(),
         });
     }
@@ -304,9 +292,10 @@ impl KonataBuilder {
             return Err(ParseError::Validation(ValidationError::MissingHeader));
         }
 
-        let open_keys = self.active.keys().cloned().collect::<Vec<_>>();
-        for key in open_keys {
-            self.close_key(&key, self.cycle);
+        for (inst_id, lanes) in std::mem::take(&mut self.active) {
+            for active in lanes {
+                self.finish_stage(inst_id, active, self.cycle);
+            }
         }
 
         let mut instructions = self.instructions.into_values().collect::<Vec<_>>();
@@ -322,8 +311,8 @@ impl KonataBuilder {
         let stages = stage_ids
             .into_iter()
             .map(|id| Stage {
-                label: id.clone(),
-                id,
+                label: id.to_string(),
+                id: id.to_string(),
                 attrs: Vec::new(),
             })
             .collect::<Vec<_>>();

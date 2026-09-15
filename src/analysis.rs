@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use crate::model::{KeyValue, Span, Trace};
+use crate::model::{KeyValue, Trace};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Summary {
@@ -115,8 +115,11 @@ pub fn summarize_with_options(trace: &Trace, options: SummaryOptions) -> Summary
     } else {
         BTreeMap::new()
     };
-    let stage_stats = span_stats_by(trace, |span| span.stage.as_str());
-    let lane_stats = span_stats_by(trace, |span| span.lane.as_str());
+    let (stage_stats, lane_stats) = span_stats(trace);
+    let stage_occupancy = stage_stats
+        .iter()
+        .map(|(stage, stats)| (stage.clone(), stats.total_cycles))
+        .collect();
 
     Summary {
         cycle_start,
@@ -132,7 +135,7 @@ pub fn summarize_with_options(trace: &Trace, options: SummaryOptions) -> Summary
         top_bottlenecks: top_counts(&bottlenecks, 8),
         bottlenecks,
         status_counts: status_counts(trace),
-        stage_occupancy: stage_occupancy(trace),
+        stage_occupancy,
         stage_stats,
         lane_stats,
         retired_latency: retired_latency(trace),
@@ -167,7 +170,7 @@ pub fn summarize_for_tui(trace: &Trace, options: SummaryOptions) -> Summary {
         if retire.status == "retire" {
             retired_count += 1;
         }
-        *status_counts.entry(retire.status.clone()).or_insert(0) += 1;
+        *status_counts.entry(retire.status.as_str()).or_insert(0) += 1;
     }
 
     let cycle_count = match (cycle_start, cycle_end) {
@@ -210,7 +213,7 @@ pub fn summarize_for_tui(trace: &Trace, options: SummaryOptions) -> Summary {
         stall_reasons,
         top_bottlenecks: top_counts(&bottlenecks, 8),
         bottlenecks,
-        status_counts,
+        status_counts: own_counts(status_counts),
         stage_occupancy: BTreeMap::new(),
         stage_stats: BTreeMap::new(),
         lane_stats: BTreeMap::new(),
@@ -225,74 +228,67 @@ fn include_cycle(cycle_start: &mut Option<u64>, cycle_end: &mut Option<u64>, cyc
     *cycle_end = Some(cycle_end.map_or(cycle, |end| end.max(cycle)));
 }
 
-fn stall_reasons(trace: &Trace) -> BTreeMap<String, u64> {
-    let mut counts = BTreeMap::new();
-
-    for span in &trace.spans {
-        if span.lane == "stall" {
-            let reason = attr_value(&span.attrs, "reason").unwrap_or("unknown");
-            *counts.entry(reason.to_owned()).or_insert(0) += span.duration;
-        }
-    }
-
-    for event in &trace.events {
-        if event.event == "stall" {
-            let reason = attr_value(&event.attrs, "reason").unwrap_or("unknown");
-            *counts.entry(reason.to_owned()).or_insert(0) += 1;
-        }
-    }
-
+fn own_counts(counts: BTreeMap<&str, u64>) -> BTreeMap<String, u64> {
     counts
+        .into_iter()
+        .map(|(key, count)| (key.to_owned(), count))
+        .collect()
+}
+
+fn stall_reasons(trace: &Trace) -> BTreeMap<String, u64> {
+    lane_and_event_reasons(trace, "stall")
 }
 
 fn bottlenecks(trace: &Trace) -> BTreeMap<String, u64> {
-    let mut counts = BTreeMap::new();
-
+    let mut span_counts = BTreeMap::new();
+    let mut event_counts = BTreeMap::new();
     for span in &trace.spans {
         if span.lane != "main" {
             let reason = attr_value(&span.attrs, "reason").unwrap_or("unknown");
-            let key = format!("{}:{reason}", span.lane);
-            *counts.entry(key).or_insert(0) += span.duration;
+            *span_counts.entry((span.lane.as_str(), reason)).or_insert(0) += span.duration;
         }
     }
-
     for event in &trace.events {
         let reason = attr_value(&event.attrs, "reason").unwrap_or("unknown");
-        let key = format!("event:{}:{reason}", event.event);
-        *counts.entry(key).or_insert(0) += 1;
+        *event_counts
+            .entry((event.event.as_str(), reason))
+            .or_insert(0) += 1;
     }
-
+    // Format only distinct keys. Different tuples can produce the same public
+    // key when names contain colons, so preserve the original additive merge.
+    let mut counts = BTreeMap::new();
+    for ((lane, reason), count) in span_counts {
+        *counts.entry(format!("{lane}:{reason}")).or_insert(0) += count;
+    }
+    for ((event, reason), count) in event_counts {
+        *counts.entry(format!("event:{event}:{reason}")).or_insert(0) += count;
+    }
     counts
 }
 
 fn status_counts(trace: &Trace) -> BTreeMap<String, u64> {
     let mut counts = BTreeMap::new();
-
     for retire in &trace.retires {
-        *counts.entry(retire.status.clone()).or_insert(0) += 1;
+        *counts.entry(retire.status.as_str()).or_insert(0) += 1;
     }
-
-    counts
+    own_counts(counts)
 }
 
 fn lane_and_event_reasons(trace: &Trace, kind: &str) -> BTreeMap<String, u64> {
     let mut counts = BTreeMap::new();
-
     for span in &trace.spans {
         if span.lane == kind {
             let reason = attr_value(&span.attrs, "reason").unwrap_or("unknown");
-            *counts.entry(reason.to_owned()).or_insert(0) += span.duration;
+            *counts.entry(reason).or_insert(0) += span.duration;
         }
     }
-
     for event in &trace.events {
         if event.event == kind {
             let reason = attr_value(&event.attrs, "reason").unwrap_or("unknown");
-            *counts.entry(reason.to_owned()).or_insert(0) += 1;
+            *counts.entry(reason).or_insert(0) += 1;
         }
     }
-
-    counts
+    own_counts(counts)
 }
 
 fn top_counts(counts: &BTreeMap<String, u64>, limit: usize) -> Vec<CountEntry> {
@@ -313,33 +309,26 @@ fn top_counts(counts: &BTreeMap<String, u64>, limit: usize) -> Vec<CountEntry> {
     entries
 }
 
-fn stage_occupancy(trace: &Trace) -> BTreeMap<String, u64> {
-    let mut counts = BTreeMap::new();
-
+fn span_stats(trace: &Trace) -> (BTreeMap<String, SpanStats>, BTreeMap<String, SpanStats>) {
+    let mut stages = BTreeMap::<&str, SpanStatsAccum>::new();
+    let mut lanes = BTreeMap::<&str, SpanStatsAccum>::new();
     for span in &trace.spans {
-        *counts.entry(span.stage.clone()).or_insert(0) += span.duration;
-    }
-
-    counts
-}
-
-fn span_stats_by<'a>(
-    trace: &'a Trace,
-    key_fn: impl Fn(&'a Span) -> &'a str,
-) -> BTreeMap<String, SpanStats> {
-    let mut accum = BTreeMap::<String, SpanStatsAccum>::new();
-
-    for span in &trace.spans {
-        accum
-            .entry(key_fn(span).to_owned())
+        stages
+            .entry(span.stage.as_str())
+            .or_default()
+            .include(span.duration);
+        lanes
+            .entry(span.lane.as_str())
             .or_default()
             .include(span.duration);
     }
-
-    accum
-        .into_iter()
-        .map(|(key, stats)| (key, stats.finish()))
-        .collect()
+    let finish = |accum: BTreeMap<&str, SpanStatsAccum>| {
+        accum
+            .into_iter()
+            .map(|(key, stats)| (key.to_owned(), stats.finish()))
+            .collect()
+    };
+    (finish(stages), finish(lanes))
 }
 
 #[derive(Debug, Default)]
@@ -367,7 +356,8 @@ impl SpanStatsAccum {
 }
 
 fn retired_latency(trace: &Trace) -> Option<LatencyStats> {
-    let mut first_cycle_by_inst = BTreeMap::new();
+    let mut first_cycle_by_inst =
+        HashMap::with_capacity(trace.instructions.len().min(trace.spans.len()));
     for span in &trace.spans {
         first_cycle_by_inst
             .entry(span.inst_id)

@@ -53,7 +53,7 @@ const DEFAULT_STAGE_COLORS: [Color; 12] = [
 pub(super) struct App {
     file_name: String,
     summary: Summary,
-    rows: Vec<TimelineRowView>,
+    view: TraceView,
     pub(super) selected_row: usize,
     pub(super) cycle_offset: u64,
     pub(super) cell_width: u16,
@@ -65,12 +65,43 @@ pub(super) struct App {
     trace: Trace,
 }
 
+/// Per-instruction rows plus the record indexes the TUI needs for lookups.
+///
+/// Building this once keeps navigation and detail queries proportional to the
+/// selected instruction instead of the whole trace.
+#[derive(Debug)]
+pub struct TraceView {
+    rows: Vec<TimelineRowView>,
+    row_indexes: HashMap<u64, usize>,
+    event_indexes: HashMap<u64, Vec<usize>>,
+    retire_indexes: HashMap<u64, usize>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct TimelineRowView {
+pub struct TimelineRowView {
     inst_id: u64,
+    instruction_index: usize,
     label: String,
     span_indexes: Vec<usize>,
     last_cycle: Option<u64>,
+}
+
+impl TimelineRowView {
+    pub fn inst_id(&self) -> u64 {
+        self.inst_id
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn span_count(&self) -> usize {
+        self.span_indexes.len()
+    }
+
+    pub fn last_cycle(&self) -> Option<u64> {
+        self.last_cycle
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,11 +282,11 @@ impl App {
         let summary = summarize_for_tui(&trace, summary_options);
         let cycle_offset = summary.cycle_start.unwrap_or(0);
         let theme = theme.with_default_stage_colors(&trace.stages);
-        let rows = build_timeline_row_views(&trace);
+        let view = TraceView::new(&trace);
         Self {
             file_name: path.display().to_string(),
             summary,
-            rows,
+            view,
             selected_row: 0,
             cycle_offset,
             cell_width: DEFAULT_CELL_WIDTH,
@@ -271,7 +302,11 @@ impl App {
     }
 
     pub(super) fn selected_row(&self) -> Option<&TimelineRowView> {
-        self.rows.get(self.selected_row)
+        self.view.rows.get(self.selected_row)
+    }
+
+    fn row_count(&self) -> usize {
+        self.view.rows.len()
     }
 
     pub(super) fn selected_detail(&self) -> Option<&InstructionDetail> {
@@ -280,7 +315,9 @@ impl App {
     }
 
     fn preserve_view_state_from(&mut self, previous: &Self) {
-        self.selected_row = previous.selected_row.min(self.rows.len().saturating_sub(1));
+        self.selected_row = previous
+            .selected_row
+            .min(self.row_count().saturating_sub(1));
         self.cycle_offset = previous.cycle_offset;
         self.cell_width = previous.cell_width;
         self.overlay = previous.overlay;
@@ -295,9 +332,10 @@ impl App {
         let Some(inst_id) = self.selected_row().map(|row| row.inst_id) else {
             return;
         };
-        if !self.detail_cache.contains_key(&inst_id)
-            && let Some(detail) = build_instruction_detail(&self.trace, inst_id)
-        {
+        if self.detail_cache.contains_key(&inst_id) {
+            return;
+        }
+        if let Some(detail) = self.view.instruction_detail(&self.trace, inst_id) {
             self.detail_cache.insert(inst_id, detail);
         }
     }
@@ -319,7 +357,7 @@ impl App {
     }
 
     pub(super) fn move_down(&mut self) {
-        if self.selected_row + 1 < self.rows.len() {
+        if self.selected_row + 1 < self.row_count() {
             self.selected_row += 1;
         }
         if self.overlay == Overlay::Detail {
@@ -379,7 +417,9 @@ impl App {
     pub(super) fn apply_jump(&mut self) {
         match parse_jump_target(&self.jump_input) {
             Some((row, cycle)) => {
-                self.selected_row = row.saturating_sub(1).min(self.rows.len().saturating_sub(1));
+                self.selected_row = row
+                    .saturating_sub(1)
+                    .min(self.row_count().saturating_sub(1));
                 self.cycle_offset = cycle;
                 self.overlay = Overlay::None;
                 self.status = format!("jumped to row {} cycle {}", self.selected_row + 1, cycle);
@@ -421,8 +461,12 @@ pub fn run_path(
     let mut profile_line = None;
     let preview_format = resolve_input_format(path, input_format);
 
+    let loader_theme = theme.clone();
     thread::spawn(move || {
-        let result = read_trace(&path_buf, max_input_bytes, input_format);
+        // Summaries and row/record indexes are built here so the UI thread only
+        // has to swap in a ready-to-render app.
+        let result = read_trace(&path_buf, max_input_bytes, input_format)
+            .map(|trace| App::new(&path_buf, trace, loader_theme, summary_options));
         let _ = sender.send(result);
     });
 
@@ -436,15 +480,15 @@ pub fn run_path(
         InputFormat::Auto => unreachable!("input format must be resolved before preview parsing"),
     }
     .map(|trace| {
-        let mut app = App::new(path, trace, theme.clone(), summary_options);
+        let mut app = App::new(path, trace, theme, summary_options);
         app.status = "preview loaded; full trace still loading".to_owned();
         app
     });
 
+    let mut preview_dirty = true;
     let result = loop {
         match receiver.try_recv() {
-            Ok(Ok(trace)) => {
-                let mut app = App::new(path, trace, theme, summary_options);
+            Ok(Ok(mut app)) => {
                 if let Some(preview) = preview_app.as_ref() {
                     app.preserve_view_state_from(preview);
                     app.status = "full trace loaded".to_owned();
@@ -454,7 +498,7 @@ pub fn run_path(
                     profile_line = Some(format!(
                         "PIPEVIEW_PROFILE first_draw_ms={} rows={} instructions={} spans={}",
                         started_at.elapsed().as_millis(),
-                        app.rows.len(),
+                        app.row_count(),
                         app.summary.instruction_count,
                         app.summary.span_count
                     ));
@@ -470,12 +514,15 @@ pub fn run_path(
         }
 
         if let Some(app) = preview_app.as_mut() {
-            terminal.terminal().draw(|frame| render(frame, app))?;
+            if preview_dirty {
+                terminal.terminal().draw(|frame| render(frame, app))?;
+                preview_dirty = false;
+            }
             if profile_exit {
                 profile_line = Some(format!(
                     "PIPEVIEW_PROFILE first_draw_ms={} rows={} instructions={} spans={} mode=preview",
                     started_at.elapsed().as_millis(),
-                    app.rows.len(),
+                    app.row_count(),
                     app.summary.instruction_count,
                     app.summary.span_count
                 ));
@@ -493,6 +540,7 @@ pub fn run_path(
                 if !keys::handle_event(app, input) {
                     break Ok(());
                 }
+                preview_dirty = true;
             } else if matches!(
                 input,
                 Event::Key(key) if matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
@@ -513,7 +561,9 @@ fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App
     loop {
         terminal.draw(|frame| render(frame, app))?;
 
-        if event::poll(Duration::from_millis(100))? && !keys::handle_event(app, event::read()?) {
+        // The full trace is static: wait for input/resize instead of rebuilding
+        // the frame every 100 ms. Loading keeps its timed poll for the worker.
+        if !keys::handle_event(app, event::read()?) {
             break;
         }
     }
@@ -579,7 +629,8 @@ fn render_timeline(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         app.cell_width,
     ));
     lines.extend(
-        app.rows
+        app.view
+            .rows
             .iter()
             .enumerate()
             .skip(start)
@@ -864,7 +915,7 @@ fn render_info_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
         Line::from(format!(
             "row: {} / {}    cycle offset: {}    zoom: {}",
             app.selected_row + 1,
-            app.rows.len(),
+            app.row_count(),
             app.cycle_offset,
             app.cell_width
         )),
@@ -1165,43 +1216,114 @@ pub fn build_timeline_rows_fast(trace: &Trace) -> Vec<TimelineRow> {
     rows
 }
 
-fn build_timeline_row_views(trace: &Trace) -> Vec<TimelineRowView> {
-    let mut rows = trace
-        .instructions
-        .iter()
-        .map(|instruction| TimelineRowView {
-            inst_id: instruction.inst_id,
-            label: instruction_label(instruction),
-            span_indexes: Vec::new(),
-            last_cycle: None,
-        })
-        .collect::<Vec<_>>();
-    let row_indexes = rows
-        .iter()
-        .enumerate()
-        .map(|(index, row)| (row.inst_id, index))
-        .collect::<HashMap<_, _>>();
+impl TraceView {
+    pub fn new(trace: &Trace) -> Self {
+        let mut rows = trace
+            .instructions
+            .iter()
+            .enumerate()
+            .map(|(instruction_index, instruction)| TimelineRowView {
+                inst_id: instruction.inst_id,
+                instruction_index,
+                label: instruction_label(instruction),
+                span_indexes: Vec::new(),
+                last_cycle: None,
+            })
+            .collect::<Vec<_>>();
+        rows.sort_by_key(|row| row.inst_id);
 
-    for (span_index, span) in trace.spans.iter().enumerate() {
-        let Some(row_index) = row_indexes.get(&span.inst_id).copied() else {
-            continue;
-        };
-        if let Some(cycle) = span.cycle.checked_add(span.duration - 1) {
-            rows[row_index].last_cycle = Some(
-                rows[row_index]
-                    .last_cycle
-                    .map_or(cycle, |last| last.max(cycle)),
-            );
+        let row_indexes = rows
+            .iter()
+            .enumerate()
+            .map(|(index, row)| (row.inst_id, index))
+            .collect::<HashMap<_, _>>();
+
+        for (span_index, span) in trace.spans.iter().enumerate() {
+            let Some(row_index) = row_indexes.get(&span.inst_id).copied() else {
+                continue;
+            };
+            if let Some(cycle) = span.cycle.checked_add(span.duration - 1) {
+                rows[row_index].last_cycle = Some(
+                    rows[row_index]
+                        .last_cycle
+                        .map_or(cycle, |last| last.max(cycle)),
+                );
+            }
+            rows[row_index].span_indexes.push(span_index);
         }
-        rows[row_index].span_indexes.push(span_index);
+
+        for row in &mut rows {
+            row.span_indexes
+                .sort_by_key(|&span_index| trace.spans[span_index].cycle);
+        }
+
+        let mut event_indexes: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (event_index, event) in trace.events.iter().enumerate() {
+            event_indexes
+                .entry(event.inst_id)
+                .or_default()
+                .push(event_index);
+        }
+
+        let mut retire_indexes = HashMap::new();
+        for (retire_index, retire) in trace.retires.iter().enumerate() {
+            retire_indexes.insert(retire.inst_id, retire_index);
+        }
+
+        Self {
+            rows,
+            row_indexes,
+            event_indexes,
+            retire_indexes,
+        }
     }
 
-    rows.sort_by_key(|row| row.inst_id);
-    for row in &mut rows {
-        row.span_indexes
-            .sort_by_key(|&span_index| trace.spans[span_index].cycle);
+    pub fn rows(&self) -> &[TimelineRowView] {
+        &self.rows
     }
-    rows
+
+    pub fn row(&self, inst_id: u64) -> Option<&TimelineRowView> {
+        self.row_indexes
+            .get(&inst_id)
+            .and_then(|&index| self.rows.get(index))
+    }
+
+    pub fn instruction_detail(&self, trace: &Trace, inst_id: u64) -> Option<InstructionDetail> {
+        let row = self.row(inst_id)?;
+        let instruction = trace.instructions.get(row.instruction_index)?;
+
+        let mut spans = row
+            .span_indexes
+            .iter()
+            .map(|&span_index| span_detail(&trace.spans[span_index]))
+            .collect::<Vec<_>>();
+        sort_span_details(&mut spans);
+
+        let mut events = Vec::new();
+        if let Some(indexes) = self.event_indexes.get(&inst_id) {
+            events.extend(indexes.iter().map(|&event_index| {
+                let event = &trace.events[event_index];
+                EventDetail {
+                    cycle: event.cycle,
+                    event: event.event.clone(),
+                    attrs: event.attrs.clone(),
+                }
+            }));
+            events.sort_by_key(|event| event.cycle);
+        }
+
+        Some(InstructionDetail {
+            inst_id,
+            label: row.label.clone(),
+            attrs: instruction.attrs.clone(),
+            spans,
+            events,
+            retire: self
+                .retire_indexes
+                .get(&inst_id)
+                .map(|&retire_index| retire_detail(&trace.retires[retire_index])),
+        })
+    }
 }
 
 pub fn timeline_cell_at(row: &TimelineRow, cycle: u64) -> Option<&TimelineCell> {
@@ -1323,9 +1445,7 @@ pub fn build_instruction_details(trace: &Trace) -> BTreeMap<u64, InstructionDeta
     }
 
     for detail in details.values_mut() {
-        detail
-            .spans
-            .sort_by_key(|span| (span.cycle, span.stage.clone(), span.lane.clone()));
+        sort_span_details(&mut detail.spans);
         detail.events.sort_by_key(|event| event.cycle);
     }
 
@@ -1333,50 +1453,24 @@ pub fn build_instruction_details(trace: &Trace) -> BTreeMap<u64, InstructionDeta
 }
 
 pub fn build_instruction_detail(trace: &Trace, inst_id: u64) -> Option<InstructionDetail> {
-    let instruction = trace
-        .instructions
-        .iter()
-        .find(|instruction| instruction.inst_id == inst_id)?;
-    let mut detail = InstructionDetail {
-        inst_id,
-        label: instruction_label(instruction),
-        attrs: instruction.attrs.clone(),
-        spans: trace
-            .spans
-            .iter()
-            .filter(|span| span.inst_id == inst_id)
-            .map(span_detail)
-            .collect(),
-        events: trace
-            .events
-            .iter()
-            .filter(|event| event.inst_id == inst_id)
-            .map(|event| EventDetail {
-                cycle: event.cycle,
-                event: event.event.clone(),
-                attrs: event.attrs.clone(),
-            })
-            .collect(),
-        retire: trace
-            .retires
-            .iter()
-            .rev()
-            .find(|retire| retire.inst_id == inst_id)
-            .map(retire_detail),
-    };
-    detail
-        .spans
-        .sort_by_key(|span| (span.cycle, span.stage.clone(), span.lane.clone()));
-    detail.events.sort_by_key(|event| event.cycle);
-    Some(detail)
+    TraceView::new(trace).instruction_detail(trace, inst_id)
+}
+
+fn sort_span_details(spans: &mut [SpanDetail]) {
+    spans.sort_by(|left, right| {
+        left.cycle
+            .cmp(&right.cycle)
+            .then_with(|| left.stage.cmp(&right.stage))
+            .then_with(|| left.lane.cmp(&right.lane))
+    });
 }
 
 fn span_detail(span: &ModelSpan) -> SpanDetail {
     SpanDetail {
         cycle: span.cycle,
         duration: span.duration,
-        stage: span.stage.clone(),
-        lane: span.lane.clone(),
+        stage: span.stage.to_string(),
+        lane: span.lane.to_string(),
         attrs: span.attrs.clone(),
     }
 }

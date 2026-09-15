@@ -49,11 +49,11 @@ pub fn validate_trace(trace: &Trace) -> Result<(), ValidationError> {
         }
 
         if !lane_ids.contains(span.lane.as_str()) {
-            return Err(ValidationError::UnknownLane(span.lane.clone()));
+            return Err(ValidationError::UnknownLane(span.lane.to_string()));
         }
 
         if !stage_ids.contains(span.stage.as_str()) {
-            return Err(ValidationError::UnknownStage(span.stage.clone()));
+            return Err(ValidationError::UnknownStage(span.stage.to_string()));
         }
     }
 

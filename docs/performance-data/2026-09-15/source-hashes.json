@@ -1,0 +1,42 @@
+{
+  "base_commit": "50cee75",
+  "note": "Working tree was already dirty. baseline_latest is the stopped user snapshot; final is this optimization. Benchmark-only variants add instrumentation.",
+  "baseline_latest": {
+    "src/analysis.rs": "dceec5e163a74d2830287ed56f4d181a1af933351837d2ec1c45e0b9a14d6968",
+    "src/cli.rs": "9be8c0815229eacd090038307e0bf9f0c4499feece78f3d4e311a377fd289883",
+    "src/error.rs": "20387eb76be9b2d934eed8303c1d63c77204268d2ea8023e5ea3e91465acb387",
+    "src/konata.rs": "a952de0d719e57b377b72ec666894063b54122d5e9a9b462cb18589244ebf289",
+    "src/lib.rs": "a5f8b769621da9963f5662c710b852999c7bee4bdd471148fcea8c8c06aabc42",
+    "src/main.rs": "24faba944caa7560686162d9c06da788c7cf827a762010ace84249c2ca3d79de",
+    "src/model.rs": "a695fb01d9ea7ae0c7c2051b0ab9e06b026f523973c7b7411cb2a3ffd5bf2d0f",
+    "src/parser.rs": "7b70ab30baeaf13bae0aab5caa249be0ff924d6761b538e67f8304b9757d991c",
+    "src/plog_io.rs": "9950c852d96b0f05757f1a33648aa77a078ddad5814f4071d7f83c180799512c",
+    "src/tui/keys.rs": "db76d3ceb48a4280ed7bcfd11f5e0eaaff398d8c2d9d4e6b79526455fbaa8194",
+    "src/tui.rs": "edd2891d51b6e46182492fd2894dc2275db29af6a438835dc177e744386fbd7d",
+    "src/validate.rs": "c2ffa4a7d56e098bf08b2d4cf7119e03c1ea510fac57847a0e58d77df339769a",
+    "tests/compression.rs": "99c696839b3cba6364337182ed80015cc35e19d32a8fee5489d16b4e8c055d81",
+    "tests/performance.rs": "7c9b0a035ed3a5151a9c3f1ec919697f91a344800640139c25a203b31e9bcaa5",
+    "tests/summary.rs": "0e29f03cbe332be2270b0db7bd4e27312c9b440446b8d8d967371d9d217b9bc0",
+    "tests/tui_theme.rs": "452098a0dc85282eb85a40874d50109a241ab2b0bcde99b31035a22f5ccedee3"
+  },
+  "final": {
+    "src/analysis.rs": "6b6c2f4bb012ce6a1810e92862cf3761a7e4f3e325ba59949c89678366104a3e",
+    "src/cli.rs": "9be8c0815229eacd090038307e0bf9f0c4499feece78f3d4e311a377fd289883",
+    "src/error.rs": "20387eb76be9b2d934eed8303c1d63c77204268d2ea8023e5ea3e91465acb387",
+    "src/konata.rs": "bc1877e1956fcd5c96bf61fba0254318f367e0ac905ff22fb42729625ebf8cab",
+    "src/lib.rs": "a5f8b769621da9963f5662c710b852999c7bee4bdd471148fcea8c8c06aabc42",
+    "src/main.rs": "24faba944caa7560686162d9c06da788c7cf827a762010ace84249c2ca3d79de",
+    "src/model.rs": "f61970df6ada54f774eb5ead674e2d04d487b5c0d4302bf84ee8994de8753e9b",
+    "src/parser.rs": "ab99dc0eade9f8287b2ea2184c02576bd80d13f003bb7b968ef9ce57e25c0d4c",
+    "src/plog_io.rs": "9950c852d96b0f05757f1a33648aa77a078ddad5814f4071d7f83c180799512c",
+    "src/tui/keys.rs": "db76d3ceb48a4280ed7bcfd11f5e0eaaff398d8c2d9d4e6b79526455fbaa8194",
+    "src/tui.rs": "07b7a9f6766a767e9a2465c9fcfd0f43da58cf9f2e37e7251af30ddc4392724d",
+    "src/validate.rs": "6bfbaa965d14d4d5262db59772d54b3188ab2bd36b89d411c733db0ea5b397c8",
+    "tests/compression.rs": "99c696839b3cba6364337182ed80015cc35e19d32a8fee5489d16b4e8c055d81",
+    "tests/optimized_paths.rs": "684afdfbc12c5c0f1f98cb2e05ed68cc2b83b6675b85ce5ec7dc96e369c67f91",
+    "tests/performance.rs": "7c9b0a035ed3a5151a9c3f1ec919697f91a344800640139c25a203b31e9bcaa5",
+    "tests/summary.rs": "0e29f03cbe332be2270b0db7bd4e27312c9b440446b8d8d967371d9d217b9bc0",
+    "tests/tui_theme.rs": "452098a0dc85282eb85a40874d50109a241ab2b0bcde99b31035a22f5ccedee3"
+  },
+  "input_sha256": "56bfd3acae70382f8ff088e411ac83b1a4dbcfb75ca8753f8eca6c1dbb269f26"
+}
