@@ -1,10 +1,11 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::BufRead;
 
 use crate::error::{ParseError, ValidationError};
 use crate::model::{
     Instruction, KeyValue, Lane, RetireEvent, Span, SpanName, SpanNames, Stage, Trace,
 };
+use crate::parser::Fields;
 
 #[derive(Debug)]
 struct ActiveStage {
@@ -20,10 +21,10 @@ struct KonataBuilder {
     instructions: HashMap<u64, Instruction>,
     labels: HashMap<u64, Vec<KeyValue>>,
     active: HashMap<u64, Vec<ActiveStage>>,
+    /// Only stage names are interned here, so it doubles as the stage set.
     span_names: SpanNames,
-    lane_names: HashMap<i64, SpanName>,
-    stages: HashSet<SpanName>,
-    lanes: HashSet<i64>,
+    /// Konata traces use a few small lane ids; a list beats hashing them.
+    lanes: Vec<(i64, SpanName)>,
     spans: Vec<Span>,
     retires: Vec<RetireEvent>,
     events: Vec<crate::model::Event>,
@@ -80,15 +81,17 @@ fn parse_konata_reader_with_limit<R: BufRead>(
 }
 
 fn strip_comment(line: &str) -> &str {
-    line.split_once("//")
-        .map_or(line, |(before_comment, _)| before_comment)
-        .trim_end_matches('\r')
-        .trim_end()
+    let bytes = line.as_bytes();
+    let end = bytes
+        .windows(2)
+        .position(|pair| pair == b"//")
+        .unwrap_or(line.len());
+    line[..end].trim_end_matches('\r').trim_end()
 }
 
 impl KonataBuilder {
     fn push_line(&mut self, line: &str) -> Result<(), String> {
-        let mut fields = line.split('\t');
+        let mut fields = Fields::new(line);
         let command = fields.next().unwrap_or_default();
 
         if !self.saw_header {
@@ -153,7 +156,7 @@ impl KonataBuilder {
                 )?;
                 let text_type = next_field(&mut fields, "L", "text type")?;
                 if text_type == "0" {
-                    let text = fields.collect::<Vec<_>>().join("\t");
+                    let text = fields.rest().to_owned();
                     self.labels.entry(inst_id).or_default().push(KeyValue {
                         key: "asm".to_owned(),
                         value: text,
@@ -171,11 +174,9 @@ impl KonataBuilder {
 
                 self.close_stage(inst_id, lane_id, None, self.cycle);
                 let stage = self.span_names.intern(stage);
-                self.stages.insert(stage.clone());
-                self.lanes.insert(lane_id);
-                self.lane_names
-                    .entry(lane_id)
-                    .or_insert_with(|| lane_name(lane_id).into());
+                if !self.lanes.iter().any(|(id, _)| *id == lane_id) {
+                    self.lanes.push((lane_id, lane_name(lane_id).into()));
+                }
                 self.active.entry(inst_id).or_default().push(ActiveStage {
                     lane_id,
                     cycle: self.cycle,
@@ -258,10 +259,9 @@ impl KonataBuilder {
         }) else {
             return;
         };
+        // Keep the emptied list: the instruction's next stage reuses it, and
+        // retirement removes it.
         let active = lanes.remove(index);
-        if lanes.is_empty() {
-            self.active.remove(&inst_id);
-        }
         self.finish_stage(inst_id, active, end_cycle);
     }
 
@@ -281,7 +281,12 @@ impl KonataBuilder {
             cycle: start_cycle,
             duration,
             inst_id,
-            lane: self.lane_names[&active.lane_id].clone(),
+            lane: self
+                .lanes
+                .iter()
+                .find(|(id, _)| *id == active.lane_id)
+                .map(|(_, name)| name.clone())
+                .expect("lanes are registered when a stage starts"),
             stage: active.stage,
             attrs: Vec::new(),
         });
@@ -306,7 +311,7 @@ impl KonataBuilder {
             }
         }
 
-        let mut stage_ids = self.stages.into_iter().collect::<Vec<_>>();
+        let mut stage_ids = self.span_names.iter().cloned().collect::<Vec<_>>();
         stage_ids.sort();
         let stages = stage_ids
             .into_iter()
@@ -316,7 +321,7 @@ impl KonataBuilder {
                 attrs: Vec::new(),
             })
             .collect::<Vec<_>>();
-        let mut lane_ids = self.lanes.into_iter().collect::<Vec<_>>();
+        let mut lane_ids = self.lanes.iter().map(|(id, _)| *id).collect::<Vec<_>>();
         lane_ids.sort();
         let lanes = lane_ids
             .into_iter()

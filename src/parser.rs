@@ -1,5 +1,4 @@
 use std::io::BufRead;
-use std::str::Split;
 
 use crate::error::{ParseError, ValidationError};
 use crate::model::{
@@ -7,6 +6,8 @@ use crate::model::{
     Trace,
 };
 use crate::validate::validate_trace;
+
+mod parallel;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RawRecord<'a> {
@@ -53,7 +54,46 @@ enum RawRecord<'a> {
     },
 }
 
-type Fields<'a> = Split<'a, char>;
+/// Tab-separated field iterator. Fields are short, so a plain byte scan is
+/// cheaper than `str::split`'s generic searcher.
+pub(crate) struct Fields<'a> {
+    rest: Option<&'a str>,
+}
+
+impl<'a> Fields<'a> {
+    pub(crate) fn new(line: &'a str) -> Self {
+        Self { rest: Some(line) }
+    }
+
+    /// Everything after the fields consumed so far, tabs included.
+    pub(crate) fn rest(self) -> &'a str {
+        self.rest.unwrap_or_default()
+    }
+
+    fn remaining(&self) -> usize {
+        self.rest.map_or(0, |rest| {
+            rest.bytes().filter(|&byte| byte == b'\t').count() + 1
+        })
+    }
+}
+
+impl<'a> Iterator for Fields<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<&'a str> {
+        let rest = self.rest?;
+        match rest.bytes().position(|byte| byte == b'\t') {
+            Some(tab) => {
+                self.rest = Some(&rest[tab + 1..]);
+                Some(&rest[..tab])
+            }
+            None => {
+                self.rest = None;
+                Some(rest)
+            }
+        }
+    }
+}
 
 pub fn parse_plog(input: &str) -> Result<Trace, ParseError> {
     if input.is_empty() {
@@ -76,7 +116,10 @@ pub fn parse_plog(input: &str) -> Result<Trace, ParseError> {
 }
 
 pub fn parse_plog_reader<R: BufRead>(reader: R) -> Result<Trace, ParseError> {
-    parse_plog_reader_with_limit(reader, None)
+    match parallel::worker_count() {
+        0 | 1 => parse_plog_reader_with_limit(reader, None),
+        workers => parallel::parse_parallel(reader, workers),
+    }
 }
 
 pub fn parse_plog_preview_reader<R: BufRead>(
@@ -91,7 +134,7 @@ fn parse_plog_reader_with_limit<R: BufRead>(
     span_limit: Option<usize>,
 ) -> Result<Trace, ParseError> {
     let mut builder = TraceBuilder::default();
-    let mut buffer = String::new();
+    let mut buffer = Vec::new();
     let mut line_number = 0;
     let mut saw_line = false;
 
@@ -99,14 +142,16 @@ fn parse_plog_reader_with_limit<R: BufRead>(
         buffer.clear();
         line_number += 1;
         let read = reader
-            .read_line(&mut buffer)
+            .read_until(b'\n', &mut buffer)
             .map_err(|error| ParseError::line(line_number, error.to_string()))?;
         if read == 0 {
             break;
         }
 
         saw_line = true;
-        let line = buffer.strip_suffix('\n').unwrap_or(&buffer);
+        let line = std::str::from_utf8(&buffer)
+            .map_err(|_| ParseError::line(line_number, "stream did not contain valid UTF-8"))?;
+        let line = line.strip_suffix('\n').unwrap_or(line);
         let line = line.strip_suffix('\r').unwrap_or(line);
         builder.push_line(line_number, line)?;
 
@@ -131,7 +176,7 @@ fn parse_line(line: &str) -> Result<RawRecord<'_>, String> {
         return Err("malformed tab-separated record".to_string());
     }
 
-    let mut fields = line.split('\t');
+    let mut fields = Fields::new(line);
     let Some(kind) = fields.next() else {
         return Err("empty record".to_string());
     };
@@ -254,19 +299,18 @@ fn parse_retire_fields<'a>(line: &str, fields: &mut Fields<'a>) -> Result<RawRec
     })
 }
 
-fn parse_attrs<'a, I>(fields: I) -> Result<AttrMap, String>
-where
-    I: Iterator<Item = &'a str>,
-{
-    fields
-        .map(|field| match field.split_once('=') {
-            Some((key, value)) if !key.is_empty() && !value.is_empty() => Ok(KeyValue {
+fn parse_attrs(fields: &mut Fields<'_>) -> Result<AttrMap, String> {
+    let mut attrs = Vec::with_capacity(fields.remaining());
+    for field in fields {
+        match field.split_once('=') {
+            Some((key, value)) if !key.is_empty() && !value.is_empty() => attrs.push(KeyValue {
                 key: key.to_owned(),
                 value: value.to_owned(),
             }),
-            _ => Err(format!("malformed key/value attribute `{field}`")),
-        })
-        .collect()
+            _ => return Err(format!("malformed key/value attribute `{field}`")),
+        }
+    }
+    Ok(attrs)
 }
 
 fn parse_u32(input: &str, label: &str) -> Result<u32, String> {
@@ -279,13 +323,20 @@ fn parse_u64(input: &str, label: &str) -> Result<u64, String> {
 
 fn parse_number<T>(input: &str) -> Option<T>
 where
-    T: std::str::FromStr,
+    T: TryFrom<u64>,
 {
-    if input.is_empty() || !input.bytes().all(|byte| byte.is_ascii_digit()) {
+    if input.is_empty() {
         return None;
     }
-
-    input.parse().ok()
+    let mut value = 0u64;
+    for byte in input.bytes() {
+        let digit = byte.wrapping_sub(b'0');
+        if digit > 9 {
+            return None;
+        }
+        value = value.checked_mul(10)?.checked_add(u64::from(digit))?;
+    }
+    T::try_from(value).ok()
 }
 
 fn take_exact<'a>(

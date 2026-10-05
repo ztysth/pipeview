@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::model::{KeyValue, Trace};
+use crate::model::{InstructionOrder, KeyValue, Trace};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Summary {
@@ -356,14 +356,28 @@ impl SpanStatsAccum {
 }
 
 fn retired_latency(trace: &Trace) -> Option<LatencyStats> {
-    let mut first_cycle_by_inst =
-        HashMap::with_capacity(trace.instructions.len().min(trace.spans.len()));
+    // Spans of validated traces always name a known instruction; a preview
+    // trace may not, so those few go through a map instead.
+    let order = InstructionOrder::new(&trace.instructions);
+    let mut first_cycles = vec![u64::MAX; order.len()];
+    let mut stray_first_cycles = HashMap::new();
     for span in &trace.spans {
-        first_cycle_by_inst
-            .entry(span.inst_id)
-            .and_modify(|cycle: &mut u64| *cycle = (*cycle).min(span.cycle))
-            .or_insert(span.cycle);
+        let first = match order.rank(span.inst_id) {
+            Some(rank) => &mut first_cycles[rank],
+            None => stray_first_cycles.entry(span.inst_id).or_insert(u64::MAX),
+        };
+        *first = (*first).min(span.cycle);
     }
+    let first_cycle_by_inst = |inst_id: u64| {
+        let first = match order.rank(inst_id) {
+            Some(rank) => first_cycles[rank],
+            None => stray_first_cycles
+                .get(&inst_id)
+                .copied()
+                .unwrap_or(u64::MAX),
+        };
+        (first != u64::MAX).then_some(first)
+    };
 
     let mut count = 0;
     let mut min = u64::MAX;
@@ -374,10 +388,10 @@ fn retired_latency(trace: &Trace) -> Option<LatencyStats> {
         if retire.status != "retire" {
             continue;
         }
-        let Some(first_cycle) = first_cycle_by_inst.get(&retire.inst_id) else {
+        let Some(first_cycle) = first_cycle_by_inst(retire.inst_id) else {
             continue;
         };
-        if retire.cycle < *first_cycle {
+        if retire.cycle < first_cycle {
             continue;
         }
         let latency = retire.cycle - first_cycle + 1;
