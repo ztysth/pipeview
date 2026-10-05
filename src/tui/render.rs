@@ -4,87 +4,45 @@ use std::time::Duration;
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+    Block, Clear, Padding, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
 };
 
 use super::{App, InstructionDetail, Overlay, TimelineRowView, Viewport, attr_value};
 use crate::analysis::{CountEntry, SpanStats};
 use crate::model::{Instruction, KeyValue, Span as ModelSpan};
 
-const ACCENT: Color = Color::Rgb(0x7a, 0xa2, 0xf7);
-const MUTED: Color = Color::Rgb(0x73, 0x7a, 0x8c);
-const BRIGHT: Color = Color::Rgb(0xe6, 0xe9, 0xef);
-const TICK: Color = Color::Rgb(0xe0, 0xaf, 0x68);
-const PC: Color = Color::Rgb(0x7d, 0xcf, 0xff);
-const GRID: Color = Color::Rgb(0x3b, 0x42, 0x52);
-const ROW_HIGHLIGHT: Color = Color::Rgb(0x28, 0x2e, 0x3d);
-const PANEL_BG: Color = Color::Rgb(0x1a, 0x1d, 0x29);
-const INK: Color = Color::Rgb(0x16, 0x18, 0x22);
-const WARN: Color = Color::Rgb(0xff, 0x9e, 0x64);
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const MAX_DETAIL_SPANS: usize = 12;
 const MAX_DETAIL_EVENTS: usize = 6;
 
-/// Chrome styles. Without color every role falls back to plain text
-/// modifiers so the layout stays legible on monochrome terminals.
+/// Chrome styles: plain text with bold for emphasis and gray for secondary
+/// information. Only the pipeline blocks carry color.
 struct Palette {
-    accent: Style,
-    badge: Style,
-    warn_badge: Style,
+    strong: Style,
     muted: Style,
-    value: Style,
-    pc: Style,
-    tick: Style,
-    grid: Style,
-    row_highlight: Style,
-    selected_label: Style,
-    panel: Style,
-    key: Style,
+    selected: Style,
 }
 
 impl Palette {
     fn new(colored: bool) -> Self {
-        if !colored {
-            return Self {
-                accent: Style::new().bold(),
-                badge: Style::new().reversed().bold(),
-                warn_badge: Style::new().reversed().bold(),
-                muted: Style::new().dim(),
-                value: Style::new().bold(),
-                pc: Style::new(),
-                tick: Style::new().bold(),
-                grid: Style::new().dim(),
-                row_highlight: Style::new(),
-                selected_label: Style::new().reversed(),
-                panel: Style::new(),
-                key: Style::new().reversed(),
-            };
-        }
-
         Self {
-            accent: Style::new().fg(ACCENT).bold(),
-            badge: Style::new().fg(INK).bg(ACCENT).bold(),
-            warn_badge: Style::new().fg(INK).bg(WARN).bold(),
-            muted: Style::new().fg(MUTED),
-            value: Style::new().fg(BRIGHT).bold(),
-            pc: Style::new().fg(PC),
-            tick: Style::new().fg(TICK).bold(),
-            grid: Style::new().fg(GRID),
-            row_highlight: Style::new().bg(ROW_HIGHLIGHT),
-            selected_label: Style::new().fg(INK).bg(ACCENT).bold(),
-            panel: Style::new().fg(BRIGHT).bg(PANEL_BG),
-            key: Style::new().fg(INK).bg(MUTED).bold(),
+            strong: Style::new().bold(),
+            muted: if colored {
+                Style::new().fg(Color::DarkGray)
+            } else {
+                Style::new().dim()
+            },
+            selected: Style::new().reversed(),
         }
     }
 }
 
 pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
     let palette = Palette::new(app.theme.colored());
-    let [top, legend, body, status] = Layout::vertical([
-        Constraint::Length(1),
+    let [top, body, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(3),
         Constraint::Length(1),
@@ -92,7 +50,6 @@ pub(super) fn render(frame: &mut Frame<'_>, app: &App) {
     .areas(frame.area());
 
     render_top_bar(frame, top, app, &palette);
-    render_legend(frame, legend, app, &palette);
     render_timeline(frame, body, app, &palette);
     render_status(frame, status, app, &palette);
     render_overlay(frame, frame.area(), app, &palette);
@@ -103,9 +60,8 @@ pub(super) fn render_loading(frame: &mut Frame<'_>, path: &Path, elapsed: Durati
     let spinner = SPINNER[(elapsed.as_millis() / 100) as usize % SPINNER.len()];
     let lines = vec![
         Line::from(vec![
-            Span::styled(format!("{spinner} "), palette.accent),
-            Span::raw("reading "),
-            Span::styled(path.display().to_string(), palette.value),
+            Span::raw(format!("{spinner} loading ")),
+            Span::styled(path.display().to_string(), palette.strong),
         ]),
         Line::from(vec![
             Span::styled("elapsed ", palette.muted),
@@ -113,7 +69,7 @@ pub(super) fn render_loading(frame: &mut Frame<'_>, path: &Path, elapsed: Durati
         ]),
         Line::default(),
         Line::from(vec![
-            Span::styled(" Esc ", palette.key),
+            Span::styled("Esc", palette.strong),
             Span::styled(" cancel", palette.muted),
         ]),
     ];
@@ -126,12 +82,10 @@ pub(super) fn render_loading(frame: &mut Frame<'_>, path: &Path, elapsed: Durati
 }
 
 fn render_top_bar(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
-    let mut left = vec![Span::styled(" pipeview ", palette.badge), Span::raw(" ")];
+    let mut left = vec![Span::styled(format!(" {}", app.file_name), palette.strong)];
     if app.preview {
-        left.push(Span::styled(" PREVIEW ", palette.warn_badge));
-        left.push(Span::raw(" "));
+        left.push(Span::styled("  (preview)", palette.muted));
     }
-    left.push(Span::styled(app.file_name.clone(), palette.accent));
 
     let summary = &app.summary;
     let ipc = summary
@@ -148,41 +102,26 @@ fn render_top_bar(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palett
         ("IPC", ipc),
         ("cycles", cycles),
     ] {
-        right.push(Span::styled(format!("  {key} "), palette.muted));
-        right.push(Span::styled(value, palette.value));
+        right.push(Span::styled(format!("   {key} "), palette.muted));
+        right.push(Span::raw(value));
     }
     right.push(Span::raw(" "));
 
     render_split_line(frame, area, Line::from(left), Line::from(right));
 }
 
-fn render_legend(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
-    let mut spans = vec![Span::styled(" stages ", palette.muted)];
-    for stage in &app.trace.stages {
-        spans.push(Span::styled(
-            format!(" {} ", stage.id),
-            app.theme
-                .style_for_stage(&stage.id)
-                .add_modifier(Modifier::BOLD),
-        ));
-        spans.push(Span::raw(" "));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
 fn render_timeline(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     let row_count = app.row_count();
     let position = format!(
-        " row {}/{} · cycle {} · zoom {}× ",
+        " row {}/{}  cycle {}  zoom {} ",
         group((app.selected_row + 1).min(row_count) as u64),
         group(row_count as u64),
         group(app.cycle_offset),
         app.cell_width
     );
     let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(palette.grid)
-        .title(Line::styled(" Timeline ", palette.accent))
+        .border_style(palette.muted)
+        .title(Line::styled(" Timeline ", palette.strong))
         .title(Line::styled(position, palette.muted).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
@@ -192,7 +131,7 @@ fn render_timeline(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palet
 
     let row_limit = (inner.height - 1) as usize;
     let first_row = scroll_to_selection(app, row_limit);
-    let label_width = (app.label_width + 2).clamp(8, (inner.width as usize / 3).max(8));
+    let label_width = (app.label_width + 1).clamp(8, (inner.width as usize / 3).max(8));
     let cell_width = app.cell_width as usize;
     let grid_width = (inner.width as usize).saturating_sub(label_width + 1);
     let visible_cycles = (grid_width / cell_width).max(1) as u64;
@@ -204,11 +143,11 @@ fn render_timeline(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palet
     let rows = &app.view.rows()[first_row..(first_row + row_limit).min(row_count)];
     let mut lines = Vec::with_capacity(rows.len() + 1);
     lines.push(Line::from(vec![
-        Span::styled(fit_left("  inst", label_width), palette.muted),
-        Span::styled("│", palette.grid),
+        Span::styled(fit_left("inst", label_width), palette.muted),
+        Span::styled("│", palette.muted),
         Span::styled(
             cycle_ticks(app.cycle_offset, visible_cycles, cell_width),
-            palette.tick,
+            palette.muted,
         ),
     ]));
     for (index, row) in rows.iter().enumerate() {
@@ -230,7 +169,7 @@ fn render_timeline(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palet
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .track_style(palette.grid)
+                .track_symbol(None)
                 .thumb_style(palette.muted),
             area.inner(ratatui::layout::Margin {
                 horizontal: 0,
@@ -266,31 +205,17 @@ fn timeline_row(
     let cell_width = app.cell_width as usize;
     let instruction = &app.trace.instructions[row.instruction_index];
     let mut spans = Vec::with_capacity(16);
-    spans.push(Span::styled(
-        if selected { "▌" } else { " " },
-        palette.accent,
-    ));
-    label_spans(instruction, label_width - 1, selected, palette, &mut spans);
-    spans.push(Span::styled("│", palette.grid));
+    label_spans(instruction, label_width, selected, palette, &mut spans);
+    spans.push(Span::styled("│", palette.muted));
 
-    let empty_style = if selected {
-        palette.grid.patch(palette.row_highlight)
-    } else {
-        palette.grid
-    };
     for run in row_runs(app, row, visible_cycles) {
         let width = run.width as usize * cell_width;
         match run.span {
             Some(span) => spans.push(Span::styled(
                 fit_center(&block_label(span, width), width),
-                app.theme
-                    .style_for_stage(&span.stage)
-                    .add_modifier(Modifier::BOLD),
+                app.theme.style_for_stage(&span.stage),
             )),
-            None => spans.push(Span::styled(
-                empty_cells(run.width as usize, cell_width),
-                empty_style,
-            )),
+            None => spans.push(Span::raw(" ".repeat(width))),
         }
     }
     Line::from(spans)
@@ -307,7 +232,7 @@ fn label_spans(
         (Some(format!("#{}", instruction.inst_id)), palette.muted),
         (
             attr_value(&instruction.attrs, "pc").map(|pc| format!(" {pc}")),
-            palette.pc,
+            Style::new(),
         ),
         (
             attr_value(&instruction.attrs, "asm").map(|asm| format!(" {asm}")),
@@ -324,18 +249,14 @@ fn label_spans(
         remaining -= text.chars().count();
         spans.push(Span::styled(
             text,
-            if selected {
-                palette.selected_label
-            } else {
-                style
-            },
+            if selected { palette.selected } else { style },
         ));
     }
     if remaining > 0 {
         spans.push(Span::styled(
             " ".repeat(remaining),
             if selected {
-                palette.selected_label
+                palette.selected
             } else {
                 Style::new()
             },
@@ -412,15 +333,6 @@ fn block_label(span: &ModelSpan, width: usize) -> String {
     }
 }
 
-fn empty_cells(cycles: usize, cell_width: usize) -> String {
-    if cell_width < 2 {
-        return " ".repeat(cycles);
-    }
-    let left = (cell_width - 1) / 2;
-    let cell = format!("{}·{}", " ".repeat(left), " ".repeat(cell_width - 1 - left));
-    cell.repeat(cycles)
-}
-
 /// Cycle numbers spaced so that none overlap: every cycle when the cell is
 /// wide enough, otherwise every 2, 5, 10, 20, 50, ... cycles.
 fn cycle_ticks(offset: u64, cycles: u64, cell_width: usize) -> String {
@@ -470,10 +382,9 @@ fn tick_step(digits: usize, cell_width: usize) -> u64 {
 fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette) {
     if app.overlay == Overlay::Jump {
         let line = Line::from(vec![
-            Span::styled(" jump ", palette.badge),
-            Span::styled(" row,cycle › ", palette.muted),
+            Span::styled(" jump to row,cycle: ", palette.strong),
             Span::raw(app.jump_input.clone()),
-            Span::styled("▏", palette.accent),
+            Span::raw("_"),
         ]);
         frame.render_widget(Paragraph::new(line), area);
         return;
@@ -489,10 +400,10 @@ fn render_status(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palette
         ("+/-", "zoom"),
         ("q", "quit"),
     ] {
-        hints.push(Span::styled(format!(" {key} "), palette.key));
+        hints.push(Span::styled(format!(" {key}"), palette.strong));
         hints.push(Span::styled(format!(" {action}  "), palette.muted));
     }
-    let message = Line::from(Span::styled(format!("{} ", app.status), palette.accent));
+    let message = Line::raw(format!("{} ", app.status));
     render_split_line(frame, area, Line::from(hints), message);
 }
 
@@ -517,7 +428,7 @@ fn render_overlay(frame: &mut Frame<'_>, area: Rect, app: &App, palette: &Palett
             let (title, lines) = match app.selected_detail() {
                 Some(detail) => (
                     format!("Instruction #{}", detail.inst_id),
-                    detail_lines(app, detail, palette),
+                    detail_lines(detail, palette),
                 ),
                 None => (
                     "Instruction".to_owned(),
@@ -550,10 +461,7 @@ fn show_panel(
 
 fn panel<'a>(title: &str, palette: &Palette) -> Block<'a> {
     Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(palette.accent)
-        .title(Line::styled(format!(" {title} "), palette.accent))
-        .style(palette.panel)
+        .title(Line::styled(format!(" {title} "), palette.strong))
         .padding(Padding::horizontal(1))
 }
 
@@ -566,7 +474,7 @@ fn key_value(key: &str, value: Vec<Span<'static>>, palette: &Palette) -> Line<'s
 }
 
 fn section(title: &str, palette: &Palette) -> Line<'static> {
-    Line::styled(title.to_owned(), palette.accent)
+    Line::styled(title.to_owned(), palette.strong)
 }
 
 fn info_lines(app: &App, palette: &Palette) -> Vec<Line<'static>> {
@@ -576,7 +484,7 @@ fn info_lines(app: &App, palette: &Palette) -> Vec<Line<'static>> {
     if let Some(row) = app.selected_row() {
         lines.push(key_value(
             "selected",
-            vec![Span::styled(row.label(&app.trace), palette.value)],
+            vec![Span::styled(row.label(&app.trace), palette.strong)],
             palette,
         ));
         let at_cycle = app
@@ -590,8 +498,8 @@ fn info_lines(app: &App, palette: &Palette) -> Vec<Line<'static>> {
                 || vec![Span::styled("idle", palette.muted)],
                 |span| {
                     vec![
-                        stage_chip(app, span.stage.as_str()),
-                        Span::styled(format!(" lane {}", span.lane), palette.muted),
+                        Span::styled(span.stage.to_string(), palette.strong),
+                        Span::styled(format!("  lane {}", span.lane), palette.muted),
                     ]
                 },
             );
@@ -616,7 +524,7 @@ fn info_lines(app: &App, palette: &Palette) -> Vec<Line<'static>> {
     ] {
         lines.push(key_value(
             key,
-            vec![Span::styled(value, palette.value)],
+            vec![Span::styled(value, palette.strong)],
             palette,
         ));
     }
@@ -625,22 +533,8 @@ fn info_lines(app: &App, palette: &Palette) -> Vec<Line<'static>> {
     if has_stats {
         lines.push(Line::default());
         lines.push(section("Occupancy", palette));
-        span_stat_lines(
-            app,
-            "stages",
-            &summary.stage_stats,
-            true,
-            palette,
-            &mut lines,
-        );
-        span_stat_lines(
-            app,
-            "lanes",
-            &summary.lane_stats,
-            false,
-            palette,
-            &mut lines,
-        );
+        span_stat_lines("stages", &summary.stage_stats, palette, &mut lines);
+        span_stat_lines("lanes", &summary.lane_stats, palette, &mut lines);
     }
 
     lines.push(Line::default());
@@ -661,10 +555,8 @@ fn info_lines(app: &App, palette: &Palette) -> Vec<Line<'static>> {
 }
 
 fn span_stat_lines(
-    app: &App,
     label: &str,
     stats: &BTreeMap<String, SpanStats>,
-    chips: bool,
     palette: &Palette,
     lines: &mut Vec<Line<'static>>,
 ) {
@@ -673,11 +565,7 @@ fn span_stat_lines(
     }
     let mut value = Vec::new();
     for (key, stats) in stats.iter().take(6) {
-        if chips {
-            value.push(stage_chip(app, key));
-        } else {
-            value.push(Span::styled(key.clone(), palette.value));
-        }
+        value.push(Span::styled(key.clone(), palette.strong));
         value.push(Span::styled(
             format!(
                 " {} avg {:.1}  ",
@@ -697,7 +585,7 @@ fn count_entries(entries: &[CountEntry], palette: &Palette) -> Vec<Span<'static>
     pairs(
         entries
             .iter()
-            .take(4)
+            .take(3)
             .map(|entry| (entry.key.as_str(), entry.count)),
         palette,
     )
@@ -728,15 +616,15 @@ fn pairs<'a>(
     spans
 }
 
-fn detail_lines(app: &App, detail: &InstructionDetail, palette: &Palette) -> Vec<Line<'static>> {
+fn detail_lines(detail: &InstructionDetail, palette: &Palette) -> Vec<Line<'static>> {
     let mut lines = vec![
-        Line::styled(detail.label.clone(), palette.value),
+        Line::styled(detail.label.clone(), palette.strong),
         key_value("attrs", attrs(&detail.attrs, palette), palette),
     ];
     let retire = match &detail.retire {
         Some(retire) => {
             let mut value = vec![
-                Span::styled(retire.status.clone(), palette.value),
+                Span::styled(retire.status.clone(), palette.strong),
                 Span::styled(
                     format!(" at cycle {}  ", group(retire.cycle)),
                     palette.muted,
@@ -758,10 +646,10 @@ fn detail_lines(app: &App, detail: &InstructionDetail, palette: &Palette) -> Vec
     }
     for span in detail.spans.iter().take(MAX_DETAIL_SPANS) {
         let mut spans = vec![
-            Span::styled(format!("{:>10} ", group(span.cycle)), palette.tick),
+            Span::styled(format!("{:>10} ", group(span.cycle)), Style::new()),
             Span::styled(format!("+{:<4} ", span.duration), palette.muted),
-            stage_chip(app, &span.stage),
-            Span::raw(format!(" {}  ", span.lane)),
+            Span::styled(format!("{:<6}", span.stage), palette.strong),
+            Span::raw(format!("{}  ", span.lane)),
         ];
         if !span.attrs.is_empty() {
             spans.extend(attrs(&span.attrs, palette));
@@ -780,8 +668,8 @@ fn detail_lines(app: &App, detail: &InstructionDetail, palette: &Palette) -> Vec
     }
     for event in detail.events.iter().take(MAX_DETAIL_EVENTS) {
         let mut spans = vec![
-            Span::styled(format!("{:>10} ", group(event.cycle)), palette.tick),
-            Span::styled(format!("{}  ", event.event), palette.value),
+            Span::styled(format!("{:>10} ", group(event.cycle)), Style::new()),
+            Span::styled(format!("{}  ", event.event), palette.strong),
         ];
         spans.extend(attrs(&event.attrs, palette));
         lines.push(Line::from(spans));
@@ -812,15 +700,6 @@ fn attrs(attrs: &[KeyValue], palette: &Palette) -> Vec<Span<'static>> {
         spans.push(Span::styled("…", palette.muted));
     }
     spans
-}
-
-fn stage_chip(app: &App, stage: &str) -> Span<'static> {
-    Span::styled(
-        format!(" {stage} "),
-        app.theme
-            .style_for_stage(stage)
-            .add_modifier(Modifier::BOLD),
-    )
 }
 
 fn help_lines(palette: &Palette) -> Vec<Line<'static>> {
@@ -863,7 +742,7 @@ fn help_lines(palette: &Palette) -> Vec<Line<'static>> {
         lines.push(section(title, palette));
         for (keys, action) in entries {
             lines.push(Line::from(vec![
-                Span::styled(fit_left(keys, 12), palette.value),
+                Span::styled(fit_left(keys, 12), palette.strong),
                 Span::styled((*action).to_owned(), palette.muted),
             ]));
         }
