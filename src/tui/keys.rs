@@ -1,109 +1,77 @@
-use crossterm::event::{Event, KeyCode, KeyModifiers, MouseEventKind};
+use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use super::{App, Overlay};
 
-pub(super) fn handle_event(app: &mut App, event: Event) -> bool {
+type AppAction = fn(&mut App);
+
+pub(super) enum Action {
+    Quit,
+    Redraw,
+    Ignore,
+}
+
+pub(super) fn handle_event(app: &mut App, event: Event) -> Action {
     match event {
+        Event::Key(key) if key.kind == KeyEventKind::Release => Action::Ignore,
         Event::Key(key) if app.overlay == Overlay::Jump => {
             match key.code {
                 KeyCode::Esc => {
                     app.overlay = Overlay::None;
-                    app.status = "panel closed".to_owned();
+                    app.status.clear();
                 }
                 KeyCode::Enter => app.apply_jump(),
                 KeyCode::Backspace => app.pop_jump_char(),
                 KeyCode::Char(ch) => app.push_jump_char(ch),
-                _ => {}
+                _ => return Action::Ignore,
             }
-            true
+            Action::Redraw
         }
-        Event::Key(key) => match key.code {
-            KeyCode::Char('q') => false,
-            KeyCode::Esc if app.overlay != Overlay::None => {
-                app.overlay = Overlay::None;
-                app.status = "panel closed".to_owned();
-                true
+        Event::Key(key) => {
+            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+            match key.code {
+                KeyCode::Char('q') => return Action::Quit,
+                KeyCode::Esc if app.overlay != Overlay::None => app.overlay = Overlay::None,
+                KeyCode::Esc => return Action::Quit,
+                KeyCode::Up | KeyCode::Char('k') => app.move_up(),
+                KeyCode::Down | KeyCode::Char('j') => app.move_down(),
+                KeyCode::PageUp => app.page_up(),
+                KeyCode::PageDown => app.page_down(),
+                KeyCode::Left if shift => app.page_left(),
+                KeyCode::Right if shift => app.page_right(),
+                KeyCode::Left | KeyCode::Char('h') => app.move_left(),
+                KeyCode::Right | KeyCode::Char('l') => app.move_right(),
+                KeyCode::Char('H') => app.page_left(),
+                KeyCode::Char('L') => app.page_right(),
+                KeyCode::Home => app.jump_to_row_first_cycle(),
+                KeyCode::End => app.jump_to_row_last_cycle(),
+                KeyCode::Char('+') | KeyCode::Char('=') => app.zoom_in(),
+                KeyCode::Char('-') => app.zoom_out(),
+                KeyCode::Char('?') => app.toggle_overlay(Overlay::Help),
+                KeyCode::Char('i') => app.toggle_overlay(Overlay::Info),
+                KeyCode::Char('d') => app.toggle_detail_overlay(),
+                KeyCode::Char('g') => app.begin_jump(),
+                _ => return Action::Ignore,
             }
-            KeyCode::Esc => false,
-            KeyCode::Up => {
-                app.move_up();
-                true
-            }
-            KeyCode::Down => {
-                app.move_down();
-                true
-            }
-            KeyCode::Left => {
-                app.move_left();
-                true
-            }
-            KeyCode::Right => {
-                app.move_right();
-                true
-            }
-            KeyCode::End => {
-                app.jump_to_row_last_cycle();
-                true
-            }
-            KeyCode::Char('+') | KeyCode::Char('=') => {
-                app.zoom_in();
-                true
-            }
-            KeyCode::Char('-') => {
-                app.zoom_out();
-                true
-            }
-            KeyCode::Char('?') => {
-                app.overlay = if app.overlay == Overlay::Help {
-                    Overlay::None
-                } else {
-                    Overlay::Help
-                };
-                true
-            }
-            KeyCode::Char('i') => {
-                app.overlay = if app.overlay == Overlay::Info {
-                    Overlay::None
-                } else {
-                    Overlay::Info
-                };
-                true
-            }
-            KeyCode::Char('d') => {
-                app.toggle_detail_overlay();
-                true
-            }
-            KeyCode::Char('g') => {
-                app.begin_jump();
-                true
-            }
-            _ => true,
-        },
-        Event::Mouse(mouse) if mouse.modifiers.contains(KeyModifiers::CONTROL) => {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => app.zoom_in(),
-                MouseEventKind::ScrollDown => app.zoom_out(),
-                _ => {}
-            }
-            true
-        }
-        Event::Mouse(mouse) if mouse.modifiers.contains(KeyModifiers::ALT) => {
-            match mouse.kind {
-                MouseEventKind::ScrollUp => app.move_left(),
-                MouseEventKind::ScrollDown => app.move_right(),
-                _ => {}
-            }
-            true
+            Action::Redraw
         }
         Event::Mouse(mouse) => {
+            let (up, down): (AppAction, AppAction) =
+                if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                    (App::zoom_in, App::zoom_out)
+                } else if mouse.modifiers.contains(KeyModifiers::ALT) {
+                    (App::move_left, App::move_right)
+                } else {
+                    (App::move_up, App::move_down)
+                };
             match mouse.kind {
-                MouseEventKind::ScrollUp => app.move_up(),
-                MouseEventKind::ScrollDown => app.move_down(),
-                _ => {}
+                MouseEventKind::ScrollUp => up(app),
+                MouseEventKind::ScrollDown => down(app),
+                _ => return Action::Ignore,
             }
-            true
+            Action::Redraw
         }
-        _ => true,
+        Event::Resize(..) => Action::Redraw,
+        _ => Action::Ignore,
     }
 }
 

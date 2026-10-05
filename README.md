@@ -245,8 +245,11 @@ wheel shortcuts mirror those movements.
 | --- | --- |
 | `q` | Quit |
 | `Esc` | Close the current panel; quit when no panel is open |
-| `Up` / `Down` | Move between instruction rows |
-| `Left` / `Right` | Move the cycle window |
+| `Up` / `Down` or `k` / `j` | Move between instruction rows |
+| `PageUp` / `PageDown` | Move one screen of instruction rows |
+| `Left` / `Right` or `h` / `l` | Move the cycle window |
+| `Shift + Left` / `Shift + Right` or `H` / `L` | Move the cycle window by one screen |
+| `Home` | Jump to the first occupied cycle in the selected row |
 | `End` | Jump to the last occupied cycle in the selected row |
 | `g` | Open jump input; enter `row,cycle` |
 | `i` | Toggle the information panel |
@@ -262,8 +265,11 @@ wheel shortcuts mirror those movements.
 | --- | --- |
 | `q` | 退出 |
 | `Esc` | 关闭当前面板; 没有面板时退出 |
-| `Up` / `Down` | 在指令行之间移动 |
-| `Left` / `Right` | 移动 cycle 窗口 |
+| `Up` / `Down` 或 `k` / `j` | 在指令行之间移动 |
+| `PageUp` / `PageDown` | 按一屏移动指令行 |
+| `Left` / `Right` 或 `h` / `l` | 移动 cycle 窗口 |
+| `Shift + Left` / `Shift + Right` 或 `H` / `L` | 按一屏移动 cycle 窗口 |
+| `Home` | 跳转到当前行第一个有信息的 cycle |
 | `End` | 跳转到当前行最后一个有信息的 cycle |
 | `g` | 打开跳转输入; 输入 `row,cycle` |
 | `i` | 显示或隐藏信息面板 |

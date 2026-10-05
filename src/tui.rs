@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::io;
@@ -14,20 +15,21 @@ use crossterm::terminal::{
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
-use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::style::{Color, Style};
 use serde::Deserialize;
 
 use crate::analysis::{Summary, SummaryOptions, summarize_for_tui};
-use crate::model::{Instruction, KeyValue, RetireEvent, Span as ModelSpan, Stage, Trace};
+use crate::model::{
+    Instruction, InstructionOrder, KeyValue, RetireEvent, Span as ModelSpan, Stage, Trace,
+};
 use crate::plog_io::{
     InputFormat, read_konata_preview_trace, read_plog_preview_trace, read_trace,
     resolve_input_format,
 };
 
 mod keys;
+mod render;
+use keys::Action;
 pub use keys::parse_jump_target;
 
 const DEFAULT_CELL_WIDTH: u16 = 5;
@@ -63,26 +65,51 @@ pub(super) struct App {
     theme: Theme,
     detail_cache: BTreeMap<u64, InstructionDetail>,
     trace: Trace,
+    preview: bool,
+    label_width: usize,
+    row_offset: Cell<usize>,
+    viewport: Cell<Viewport>,
+}
+
+/// What the last frame could show; paging moves by this much.
+#[derive(Debug, Clone, Copy)]
+struct Viewport {
+    rows: usize,
+    cycles: u64,
+}
+
+impl Default for Viewport {
+    fn default() -> Self {
+        Self {
+            rows: 20,
+            cycles: 20,
+        }
+    }
 }
 
 /// Per-instruction rows plus the record indexes the TUI needs for lookups.
 ///
-/// Building this once keeps navigation and detail queries proportional to the
-/// selected instruction instead of the whole trace.
+/// Span and event indexes live in flat arrays sliced per row, so building the
+/// view costs a few large allocations instead of several per instruction, and
+/// queries stay proportional to the selected instruction.
 #[derive(Debug)]
 pub struct TraceView {
+    order: InstructionOrder,
     rows: Vec<TimelineRowView>,
-    row_indexes: HashMap<u64, usize>,
-    event_indexes: HashMap<u64, Vec<usize>>,
-    retire_indexes: HashMap<u64, usize>,
+    span_order: Vec<u32>,
+    event_offsets: Vec<u32>,
+    event_order: Vec<u32>,
+    retire_of_row: Vec<u32>,
 }
+
+const NO_RECORD: u32 = u32::MAX;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineRowView {
     inst_id: u64,
     instruction_index: usize,
-    label: String,
-    span_indexes: Vec<usize>,
+    span_start: u32,
+    span_end: u32,
     last_cycle: Option<u64>,
 }
 
@@ -91,16 +118,16 @@ impl TimelineRowView {
         self.inst_id
     }
 
-    pub fn label(&self) -> &str {
-        &self.label
-    }
-
     pub fn span_count(&self) -> usize {
-        self.span_indexes.len()
+        (self.span_end - self.span_start) as usize
     }
 
     pub fn last_cycle(&self) -> Option<u64> {
         self.last_cycle
+    }
+
+    pub fn label(&self, trace: &Trace) -> String {
+        instruction_label(&trace.instructions[self.instruction_index])
     }
 }
 
@@ -254,6 +281,10 @@ impl Theme {
         self
     }
 
+    fn colored(&self) -> bool {
+        self.color_mode != ColorMode::None
+    }
+
     pub fn style_for_stage(&self, stage: &str) -> Style {
         if self.color_mode == ColorMode::None {
             return Style::default();
@@ -279,10 +310,18 @@ impl StageStyle {
 
 impl App {
     fn new(path: &Path, trace: Trace, theme: Theme, summary_options: SummaryOptions) -> Self {
-        let summary = summarize_for_tui(&trace, summary_options);
+        let (summary, view, label_width) = thread::scope(|scope| {
+            let summary = scope.spawn(|| summarize_for_tui(&trace, summary_options));
+            let label_width = scope.spawn(|| max_label_width(&trace));
+            let view = TraceView::new(&trace);
+            (
+                summary.join().expect("summary thread panicked"),
+                view,
+                label_width.join().expect("label width thread panicked"),
+            )
+        });
         let cycle_offset = summary.cycle_start.unwrap_or(0);
         let theme = theme.with_default_stage_colors(&trace.stages);
-        let view = TraceView::new(&trace);
         Self {
             file_name: path.display().to_string(),
             summary,
@@ -292,12 +331,14 @@ impl App {
             cell_width: DEFAULT_CELL_WIDTH,
             overlay: Overlay::None,
             jump_input: String::new(),
-            status:
-                "?: help  i: info  d: detail  g: jump  Esc: close panel/quit  +/-: zoom  q: quit"
-                    .to_owned(),
+            status: String::new(),
             theme,
             detail_cache: BTreeMap::new(),
             trace,
+            preview: false,
+            label_width,
+            row_offset: Cell::new(0),
+            viewport: Cell::new(Viewport::default()),
         }
     }
 
@@ -318,6 +359,7 @@ impl App {
         self.selected_row = previous
             .selected_row
             .min(self.row_count().saturating_sub(1));
+        self.row_offset.set(previous.row_offset.get());
         self.cycle_offset = previous.cycle_offset;
         self.cell_width = previous.cell_width;
         self.overlay = previous.overlay;
@@ -340,6 +382,14 @@ impl App {
         }
     }
 
+    pub(super) fn toggle_overlay(&mut self, overlay: Overlay) {
+        self.overlay = if self.overlay == overlay {
+            Overlay::None
+        } else {
+            overlay
+        };
+    }
+
     pub(super) fn toggle_detail_overlay(&mut self) {
         if self.overlay == Overlay::Detail {
             self.overlay = Overlay::None;
@@ -351,17 +401,58 @@ impl App {
 
     pub(super) fn move_up(&mut self) {
         self.selected_row = self.selected_row.saturating_sub(1);
-        if self.overlay == Overlay::Detail {
-            self.ensure_selected_detail();
-        }
+        self.refresh_detail();
     }
 
     pub(super) fn move_down(&mut self) {
         if self.selected_row + 1 < self.row_count() {
             self.selected_row += 1;
         }
+        self.refresh_detail();
+    }
+
+    pub(super) fn page_up(&mut self) {
+        let page = self.viewport.get().rows.max(1);
+        self.selected_row = self.selected_row.saturating_sub(page);
+        self.refresh_detail();
+    }
+
+    pub(super) fn page_down(&mut self) {
+        let page = self.viewport.get().rows.max(1);
+        self.selected_row = (self.selected_row + page).min(self.row_count().saturating_sub(1));
+        self.refresh_detail();
+    }
+
+    fn refresh_detail(&mut self) {
         if self.overlay == Overlay::Detail {
             self.ensure_selected_detail();
+        }
+    }
+
+    pub(super) fn page_left(&mut self) {
+        self.cycle_offset = self
+            .cycle_offset
+            .saturating_sub(self.viewport.get().cycles.max(1));
+    }
+
+    pub(super) fn page_right(&mut self) {
+        self.cycle_offset = self
+            .cycle_offset
+            .saturating_add(self.viewport.get().cycles.max(1));
+    }
+
+    pub(super) fn jump_to_row_first_cycle(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        if let Some(first_cycle) = self
+            .view
+            .row_spans(row, &self.trace)
+            .next()
+            .map(|span| span.cycle)
+        {
+            self.cycle_offset = first_cycle;
+            self.status = format!("first cycle {first_cycle} of row {}", self.selected_row + 1);
         }
     }
 
@@ -379,10 +470,7 @@ impl App {
         };
         if let Some(last_cycle) = row.last_cycle {
             self.cycle_offset = last_cycle;
-            self.status = format!(
-                "jumped to last cycle {last_cycle} for row {}",
-                self.selected_row + 1
-            );
+            self.status = format!("last cycle {last_cycle} of row {}", self.selected_row + 1);
         }
     }
 
@@ -401,7 +489,7 @@ impl App {
     pub(super) fn begin_jump(&mut self) {
         self.overlay = Overlay::Jump;
         self.jump_input.clear();
-        self.status = "jump: enter row,cycle then Enter; Esc cancels".to_owned();
+        self.status.clear();
     }
 
     pub(super) fn push_jump_char(&mut self, ch: char) {
@@ -462,6 +550,7 @@ pub fn run_path(
     let preview_format = resolve_input_format(path, input_format);
 
     let loader_theme = theme.clone();
+    let theme_colored = theme.colored();
     thread::spawn(move || {
         // Summaries and row/record indexes are built here so the UI thread only
         // has to swap in a ready-to-render app.
@@ -481,7 +570,8 @@ pub fn run_path(
     }
     .map(|trace| {
         let mut app = App::new(path, trace, theme, summary_options);
-        app.status = "preview loaded; full trace still loading".to_owned();
+        app.preview = true;
+        app.status = "full trace still loading…".to_owned();
         app
     });
 
@@ -494,7 +584,9 @@ pub fn run_path(
                     app.status = "full trace loaded".to_owned();
                 }
                 if profile_exit {
-                    terminal.terminal().draw(|frame| render(frame, &app))?;
+                    terminal
+                        .terminal()
+                        .draw(|frame| render::render(frame, &app))?;
                     profile_line = Some(format!(
                         "PIPEVIEW_PROFILE first_draw_ms={} rows={} instructions={} spans={}",
                         started_at.elapsed().as_millis(),
@@ -515,7 +607,9 @@ pub fn run_path(
 
         if let Some(app) = preview_app.as_mut() {
             if preview_dirty {
-                terminal.terminal().draw(|frame| render(frame, app))?;
+                terminal
+                    .terminal()
+                    .draw(|frame| render::render(frame, app))?;
                 preview_dirty = false;
             }
             if profile_exit {
@@ -529,18 +623,19 @@ pub fn run_path(
                 break Ok(());
             }
         } else {
-            terminal
-                .terminal()
-                .draw(|frame| render_loading(frame, path, started_at.elapsed()))?;
+            terminal.terminal().draw(|frame| {
+                render::render_loading(frame, path, started_at.elapsed(), theme_colored)
+            })?;
         }
 
         if event::poll(Duration::from_millis(100))? {
             let input = event::read()?;
             if let Some(app) = preview_app.as_mut() {
-                if !keys::handle_event(app, input) {
-                    break Ok(());
+                match keys::handle_event(app, input) {
+                    Action::Quit => break Ok(()),
+                    Action::Redraw => preview_dirty = true,
+                    Action::Ignore => {}
                 }
-                preview_dirty = true;
             } else if matches!(
                 input,
                 Event::Key(key) if matches!(key.code, KeyCode::Esc | KeyCode::Char('q'))
@@ -559,223 +654,22 @@ pub fn run_path(
 
 fn run_loop(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, app: &mut App) -> Result<()> {
     loop {
-        terminal.draw(|frame| render(frame, app))?;
+        terminal.draw(|frame| render::render(frame, app))?;
 
-        // The full trace is static: wait for input/resize instead of rebuilding
-        // the frame every 100 ms. Loading keeps its timed poll for the worker.
-        if !keys::handle_event(app, event::read()?) {
-            break;
-        }
-    }
-
-    Ok(())
-}
-
-fn render_loading(frame: &mut ratatui::Frame<'_>, path: &Path, elapsed: Duration) {
-    let area = frame.area();
-    let lines = vec![
-        Line::from(format!("loading: {}", path.display())),
-        Line::from(format!("elapsed: {:.1}s", elapsed.as_secs_f32())),
-        Line::from("Esc/q: cancel"),
-    ];
-    let block = Paragraph::new(lines)
-        .style(Style::default().bg(Color::Black).fg(Color::White))
-        .block(Block::default().title("Loading PLog").borders(Borders::ALL));
-    frame.render_widget(block, centered_rect(area, 78, 7));
-}
-
-fn render(frame: &mut ratatui::Frame<'_>, app: &App) {
-    let area = frame.area();
-    let vertical = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Min(8),
-            Constraint::Length(1),
-        ])
-        .split(area);
-
-    render_header(frame, vertical[0], app);
-    render_timeline(frame, vertical[1], app);
-    render_status(frame, vertical[2], app);
-    render_overlay(frame, area, app);
-}
-
-fn render_header(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let ipc = app
-        .summary
-        .ipc
-        .map_or_else(|| "n/a".to_owned(), |value| format!("{value:.3}"));
-    let cycle_range = match (app.summary.cycle_start, app.summary.cycle_end) {
-        (Some(start), Some(end)) => format!("{start}-{end}"),
-        _ => "n/a".to_owned(),
-    };
-    let title = format!(
-        "{} | inst {} retired {} IPC {} cycles {}",
-        app.file_name, app.summary.instruction_count, app.summary.retired_count, ipc, cycle_range
-    );
-    let header = Paragraph::new(title).block(Block::default().borders(Borders::ALL));
-    frame.render_widget(header, area);
-}
-
-fn render_timeline(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let visible_cycles = visible_cycle_count(area.width, app.cell_width);
-    let row_limit = area.height.saturating_sub(3) as usize;
-    let start = app.selected_row.saturating_sub(row_limit.saturating_sub(1));
-    let mut lines = Vec::with_capacity(row_limit + 1);
-    lines.push(timeline_header(
-        app.cycle_offset,
-        visible_cycles,
-        app.cell_width,
-    ));
-    lines.extend(
-        app.view
-            .rows
-            .iter()
-            .enumerate()
-            .skip(start)
-            .take(row_limit)
-            .map(|(index, row)| {
-                timeline_row_view(
-                    row,
-                    &app.trace,
-                    app.cycle_offset,
-                    visible_cycles,
-                    app.cell_width,
-                    index == app.selected_row,
-                    &app.theme,
-                )
-            }),
-    );
-
-    let timeline =
-        Paragraph::new(lines).block(Block::default().title("Timeline").borders(Borders::ALL));
-    frame.render_widget(timeline, area);
-}
-
-fn timeline_header(cycle_offset: u64, visible_cycles: u64, cell_width: u16) -> Line<'static> {
-    let mut spans = Vec::with_capacity(visible_cycles as usize + 1);
-    spans.push(Span::styled(
-        fit_left("inst", 18),
-        Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    ));
-    spans.extend((0..visible_cycles).map(|offset| {
-        Span::styled(
-            fit_center(&(cycle_offset + offset).to_string(), cell_width as usize),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-    }));
-    Line::from(spans)
-}
-
-fn timeline_row_view(
-    row: &TimelineRowView,
-    trace: &Trace,
-    cycle_offset: u64,
-    visible_cycles: u64,
-    cell_width: u16,
-    selected: bool,
-    theme: &Theme,
-) -> Line<'static> {
-    let label_style = if selected {
-        Style::default().fg(Color::Black).bg(Color::White)
-    } else {
-        Style::default()
-    };
-    let mut spans = vec![Span::styled(fit_left(&row.label, 18), label_style)];
-    spans.extend(timeline_run_spans_view(
-        row,
-        trace,
-        cycle_offset,
-        visible_cycles,
-        cell_width,
-        theme,
-    ));
-    Line::from(spans)
-}
-
-fn timeline_run_spans_view(
-    row: &TimelineRowView,
-    trace: &Trace,
-    cycle_offset: u64,
-    visible_cycles: u64,
-    cell_width: u16,
-    theme: &Theme,
-) -> Vec<Span<'static>> {
-    timeline_runs_view(row, trace, cycle_offset, visible_cycles)
-        .into_iter()
-        .map(|run| {
-            let span_width = (run.width * u64::from(cell_width)) as usize;
-            match run.cell {
-                Some(cell) => Span::styled(
-                    fit_center(&cell.label, span_width),
-                    theme.style_for_stage(&cell.stage),
-                ),
-                None => Span::raw(" ".repeat(span_width)),
+        // The trace is static, so block until something changes the view, and
+        // fold bursts (wheel scrolls, key repeat) into a single frame.
+        let mut redraw = false;
+        loop {
+            match keys::handle_event(app, event::read()?) {
+                Action::Quit => return Ok(()),
+                Action::Redraw => redraw = true,
+                Action::Ignore => {}
             }
-        })
-        .collect()
-}
-
-fn timeline_runs_view(
-    row: &TimelineRowView,
-    trace: &Trace,
-    cycle_offset: u64,
-    visible_cycles: u64,
-) -> Vec<TimelineRun> {
-    let mut runs = Vec::new();
-    let window_end = cycle_offset.saturating_add(visible_cycles);
-    let mut cursor = cycle_offset;
-
-    for &span_index in &row.span_indexes {
-        let span = &trace.spans[span_index];
-        let span_end = span.cycle.saturating_add(span.duration);
-        if span_end <= cursor {
-            continue;
-        }
-        if span.cycle >= window_end {
-            break;
-        }
-
-        if span.cycle > cursor {
-            push_timeline_run(
-                &mut runs,
-                cycle_offset,
-                cursor,
-                span.cycle.min(window_end) - cursor,
-                None,
-            );
-            cursor = span.cycle;
-            if cursor >= window_end {
+            if redraw && !event::poll(Duration::ZERO)? {
                 break;
             }
         }
-
-        let clipped_end = span_end.min(window_end);
-        if clipped_end > cursor {
-            push_timeline_run(
-                &mut runs,
-                cycle_offset,
-                cursor,
-                clipped_end - cursor,
-                Some(timeline_cell(&span.stage, &span.lane)),
-            );
-            cursor = clipped_end;
-        }
-        if cursor >= window_end {
-            break;
-        }
     }
-
-    if cursor < window_end {
-        push_timeline_run(&mut runs, cycle_offset, cursor, window_end - cursor, None);
-    }
-
-    runs
 }
 
 pub fn timeline_runs(
@@ -858,275 +752,9 @@ fn push_timeline_run(
     });
 }
 
-fn fit_left(value: &str, width: usize) -> String {
-    let truncated = truncate_chars(value, width);
-    format!("{truncated:<width$}")
-}
-
-fn fit_center(value: &str, width: usize) -> String {
-    let truncated = truncate_chars(value, width);
-    let padding = width.saturating_sub(truncated.chars().count());
-    let left = padding / 2;
-    let right = padding - left;
-    format!("{}{}{}", " ".repeat(left), truncated, " ".repeat(right))
-}
-
-fn truncate_chars(value: &str, width: usize) -> String {
-    value.chars().take(width).collect()
-}
-
-fn render_status(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    let text = match app.overlay {
-        Overlay::Jump => format!("jump row,cycle: {}", app.jump_input),
-        _ => app.status.clone(),
-    };
-    frame.render_widget(Paragraph::new(text), area);
-}
-
-fn render_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    match app.overlay {
-        Overlay::None => {}
-        Overlay::Info => render_info_overlay(frame, centered_rect(area, 76, 14), app),
-        Overlay::Detail => render_detail_overlay(frame, centered_rect(area, 90, 18), app),
-        Overlay::Help => render_help_overlay(frame, centered_rect(area, 76, 12)),
-        Overlay::Jump => render_jump_overlay(frame, centered_rect(area, 58, 5), app),
-    }
-}
-
-fn render_info_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    frame.render_widget(Clear, area);
-    let selected = app
-        .selected_row()
-        .map(|row| format!("selected: {}", row.label))
-        .unwrap_or_else(|| "selected: none".to_owned());
-    let selected_cycle = app
-        .selected_row()
-        .and_then(|row| timeline_cell_at_view(row, &app.trace, app.cycle_offset))
-        .map(|cell| {
-            format!(
-                "cycle {}: {} lane={}",
-                app.cycle_offset, cell.stage, cell.lane
-            )
-        })
-        .unwrap_or_else(|| format!("cycle {}: empty", app.cycle_offset));
-    let lines = vec![
-        Line::from(selected),
-        Line::from(selected_cycle),
-        Line::from(format!(
-            "row: {} / {}    cycle offset: {}    zoom: {}",
-            app.selected_row + 1,
-            app.row_count(),
-            app.cycle_offset,
-            app.cell_width
-        )),
-        Line::from(format!(
-            "instructions: {}  retired: {}  spans: {}  cycles: {}  IPC: {}",
-            app.summary.instruction_count,
-            app.summary.retired_count,
-            app.summary.span_count,
-            app.summary.cycle_count,
-            app.summary
-                .ipc
-                .map_or_else(|| "n/a".to_owned(), |ipc| format!("{ipc:.3}"))
-        )),
-        Line::from(format_span_stats("stages", &app.summary.stage_stats)),
-        Line::from(format_span_stats("lanes", &app.summary.lane_stats)),
-        Line::from(format_count_entries("top", &app.summary.top_bottlenecks)),
-        Line::from(format_map_counts("stalls", &app.summary.stall_reasons)),
-        Line::from(format_map_counts("flush", &app.summary.flush_reasons)),
-        Line::from(format_map_counts("replay", &app.summary.replay_reasons)),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(Color::Black).fg(Color::White))
-            .block(Block::default().title("Info").borders(Borders::ALL)),
-        area,
-    );
-}
-
-fn render_detail_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    frame.render_widget(Clear, area);
-    let lines = app
-        .selected_detail()
-        .map(detail_lines)
-        .unwrap_or_else(|| vec![Line::from("selected: none")]);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(Color::Black).fg(Color::White))
-            .block(Block::default().title("Detail").borders(Borders::ALL)),
-        area,
-    );
-}
-
-fn detail_lines(detail: &InstructionDetail) -> Vec<Line<'static>> {
-    let mut lines = vec![
-        Line::from(format!("instruction: {}", detail.label)),
-        Line::from(format_attrs("attrs", &detail.attrs)),
-    ];
-
-    match &detail.retire {
-        Some(retire) => lines.push(Line::from(format!(
-            "retire: cycle={} status={} {}",
-            retire.cycle,
-            retire.status,
-            format_attrs("attrs", &retire.attrs)
-        ))),
-        None => lines.push(Line::from("retire: none")),
-    }
-
-    lines.push(Line::from("spans:"));
-    if detail.spans.is_empty() {
-        lines.push(Line::from("  none"));
-    } else {
-        lines.extend(detail.spans.iter().take(8).map(|span| {
-            Line::from(format!(
-                "  cycle={} duration={} stage={} lane={} {}",
-                span.cycle,
-                span.duration,
-                span.stage,
-                span.lane,
-                format_attrs("attrs", &span.attrs)
-            ))
-        }));
-        if detail.spans.len() > 8 {
-            lines.push(Line::from(format!("  ... {} more", detail.spans.len() - 8)));
-        }
-    }
-
-    lines.push(Line::from("events:"));
-    if detail.events.is_empty() {
-        lines.push(Line::from("  none"));
-    } else {
-        lines.extend(detail.events.iter().take(4).map(|event| {
-            Line::from(format!(
-                "  cycle={} event={} {}",
-                event.cycle,
-                event.event,
-                format_attrs("attrs", &event.attrs)
-            ))
-        }));
-        if detail.events.len() > 4 {
-            lines.push(Line::from(format!(
-                "  ... {} more",
-                detail.events.len() - 4
-            )));
-        }
-    }
-
-    lines
-}
-
-fn render_help_overlay(frame: &mut ratatui::Frame<'_>, area: Rect) {
-    frame.render_widget(Clear, area);
-    let lines = vec![
-        Line::from("Esc close panel    q quit    arrows navigate"),
-        Line::from("End jump to selected row last block"),
-        Line::from("g jump to row,cycle    i toggle info    d toggle detail    ? toggle help"),
-        Line::from("+ / = zoom in    - zoom out"),
-        Line::from("mouse wheel moves rows    Alt + mouse wheel moves cycles"),
-        Line::from("Ctrl + mouse wheel zooms when supported"),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(Color::Black).fg(Color::White))
-            .block(Block::default().title("Keys").borders(Borders::ALL)),
-        area,
-    );
-}
-
-fn render_jump_overlay(frame: &mut ratatui::Frame<'_>, area: Rect, app: &App) {
-    frame.render_widget(Clear, area);
-    let lines = vec![
-        Line::from("Enter row,cycle, e.g. 120,450. Esc closes this panel."),
-        Line::from(format!("> {}", app.jump_input)),
-    ];
-    frame.render_widget(
-        Paragraph::new(lines)
-            .style(Style::default().bg(Color::Black).fg(Color::White))
-            .block(Block::default().title("Jump").borders(Borders::ALL)),
-        area,
-    );
-}
-
-fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let width = width.min(area.width);
-    let height = height.min(area.height);
-    Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    }
-}
-
 pub fn visible_cycle_count(width: u16, cell_width: u16) -> u64 {
     let usable = width.saturating_sub(20);
     (usable / cell_width.max(1)).max(1) as u64
-}
-
-fn format_count_entries(label: &str, counts: &[crate::analysis::CountEntry]) -> String {
-    if counts.is_empty() {
-        return format!("{label}: none");
-    }
-
-    let values = counts
-        .iter()
-        .take(4)
-        .map(|entry| format!("{}={}", entry.key, entry.count))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("{label}: {values}")
-}
-
-fn format_map_counts(label: &str, counts: &BTreeMap<String, u64>) -> String {
-    if counts.is_empty() {
-        return format!("{label}: none");
-    }
-
-    let values = counts
-        .iter()
-        .take(4)
-        .map(|(key, count)| format!("{key}={count}"))
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("{label}: {values}")
-}
-
-fn format_span_stats(label: &str, stats: &BTreeMap<String, crate::analysis::SpanStats>) -> String {
-    if stats.is_empty() {
-        return format!("{label}: none");
-    }
-
-    let values = stats
-        .iter()
-        .take(4)
-        .map(|(key, value)| {
-            format!(
-                "{key}=total:{} avg:{:.1}",
-                value.total_cycles, value.average_duration
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("{label}: {values}")
-}
-
-fn format_attrs(label: &str, attrs: &[KeyValue]) -> String {
-    if attrs.is_empty() {
-        return format!("{label}: none");
-    }
-
-    let values = attrs
-        .iter()
-        .take(6)
-        .map(|attr| format!("{}={}", attr.key, attr.value))
-        .collect::<Vec<_>>()
-        .join(" ");
-    if attrs.len() > 6 {
-        format!("{label}: {values} ...")
-    } else {
-        format!("{label}: {values}")
-    }
 }
 
 pub fn build_timeline_rows(trace: &Trace) -> Vec<TimelineRow> {
@@ -1218,63 +846,56 @@ pub fn build_timeline_rows_fast(trace: &Trace) -> Vec<TimelineRow> {
 
 impl TraceView {
     pub fn new(trace: &Trace) -> Self {
-        let mut rows = trace
-            .instructions
-            .iter()
-            .enumerate()
-            .map(|(instruction_index, instruction)| TimelineRowView {
-                inst_id: instruction.inst_id,
-                instruction_index,
-                label: instruction_label(instruction),
-                span_indexes: Vec::new(),
-                last_cycle: None,
+        let order = InstructionOrder::new(&trace.instructions);
+        let row_count = order.len();
+        let mut rows = (0..row_count)
+            .map(|rank| {
+                let instruction_index = order.instruction_index(rank);
+                TimelineRowView {
+                    inst_id: trace.instructions[instruction_index].inst_id,
+                    instruction_index,
+                    span_start: 0,
+                    span_end: 0,
+                    last_cycle: None,
+                }
             })
             .collect::<Vec<_>>();
-        rows.sort_by_key(|row| row.inst_id);
 
-        let row_indexes = rows
-            .iter()
-            .enumerate()
-            .map(|(index, row)| (row.inst_id, index))
-            .collect::<HashMap<_, _>>();
-
-        for (span_index, span) in trace.spans.iter().enumerate() {
-            let Some(row_index) = row_indexes.get(&span.inst_id).copied() else {
-                continue;
-            };
-            if let Some(cycle) = span.cycle.checked_add(span.duration - 1) {
-                rows[row_index].last_cycle = Some(
-                    rows[row_index]
-                        .last_cycle
-                        .map_or(cycle, |last| last.max(cycle)),
-                );
+        let span_rows = trace.spans.iter().map(|span| order.rank(span.inst_id));
+        let (span_offsets, mut span_order) = group_by_row(row_count, span_rows);
+        for (rank, row) in rows.iter_mut().enumerate() {
+            row.span_start = span_offsets[rank];
+            row.span_end = span_offsets[rank + 1];
+            let indexes = &mut span_order[row.span_start as usize..row.span_end as usize];
+            if !indexes.is_sorted_by_key(|&index| trace.spans[index as usize].cycle) {
+                indexes.sort_by_key(|&index| trace.spans[index as usize].cycle);
             }
-            rows[row_index].span_indexes.push(span_index);
+            row.last_cycle = indexes
+                .iter()
+                .filter_map(|&index| {
+                    let span = &trace.spans[index as usize];
+                    span.cycle.checked_add(span.duration - 1)
+                })
+                .max();
         }
 
-        for row in &mut rows {
-            row.span_indexes
-                .sort_by_key(|&span_index| trace.spans[span_index].cycle);
-        }
+        let event_rows = trace.events.iter().map(|event| order.rank(event.inst_id));
+        let (event_offsets, event_order) = group_by_row(row_count, event_rows);
 
-        let mut event_indexes: HashMap<u64, Vec<usize>> = HashMap::new();
-        for (event_index, event) in trace.events.iter().enumerate() {
-            event_indexes
-                .entry(event.inst_id)
-                .or_default()
-                .push(event_index);
-        }
-
-        let mut retire_indexes = HashMap::new();
+        let mut retire_of_row = vec![NO_RECORD; row_count];
         for (retire_index, retire) in trace.retires.iter().enumerate() {
-            retire_indexes.insert(retire.inst_id, retire_index);
+            if let Some(rank) = order.rank(retire.inst_id) {
+                retire_of_row[rank] = index_u32(retire_index);
+            }
         }
 
         Self {
+            order,
             rows,
-            row_indexes,
-            event_indexes,
-            retire_indexes,
+            span_order,
+            event_offsets,
+            event_order,
+            retire_of_row,
         }
     }
 
@@ -1283,47 +904,85 @@ impl TraceView {
     }
 
     pub fn row(&self, inst_id: u64) -> Option<&TimelineRowView> {
-        self.row_indexes
-            .get(&inst_id)
-            .and_then(|&index| self.rows.get(index))
+        self.order.rank(inst_id).map(|rank| &self.rows[rank])
+    }
+
+    fn row_spans<'t>(
+        &self,
+        row: &TimelineRowView,
+        trace: &'t Trace,
+    ) -> impl Iterator<Item = &'t ModelSpan> + use<'_, 't> {
+        self.span_order[row.span_start as usize..row.span_end as usize]
+            .iter()
+            .map(|&index| &trace.spans[index as usize])
     }
 
     pub fn instruction_detail(&self, trace: &Trace, inst_id: u64) -> Option<InstructionDetail> {
-        let row = self.row(inst_id)?;
+        let rank = self.order.rank(inst_id)?;
+        let row = &self.rows[rank];
         let instruction = trace.instructions.get(row.instruction_index)?;
 
-        let mut spans = row
-            .span_indexes
-            .iter()
-            .map(|&span_index| span_detail(&trace.spans[span_index]))
+        let mut spans = self
+            .row_spans(row, trace)
+            .map(span_detail)
             .collect::<Vec<_>>();
         sort_span_details(&mut spans);
 
-        let mut events = Vec::new();
-        if let Some(indexes) = self.event_indexes.get(&inst_id) {
-            events.extend(indexes.iter().map(|&event_index| {
-                let event = &trace.events[event_index];
+        let event_indexes = &self.event_order
+            [self.event_offsets[rank] as usize..self.event_offsets[rank + 1] as usize];
+        let mut events = event_indexes
+            .iter()
+            .map(|&event_index| {
+                let event = &trace.events[event_index as usize];
                 EventDetail {
                     cycle: event.cycle,
                     event: event.event.clone(),
                     attrs: event.attrs.clone(),
                 }
-            }));
-            events.sort_by_key(|event| event.cycle);
-        }
+            })
+            .collect::<Vec<_>>();
+        events.sort_by_key(|event| event.cycle);
 
+        let retire = self.retire_of_row[rank];
         Some(InstructionDetail {
             inst_id,
-            label: row.label.clone(),
+            label: instruction_label(instruction),
             attrs: instruction.attrs.clone(),
             spans,
             events,
-            retire: self
-                .retire_indexes
-                .get(&inst_id)
-                .map(|&retire_index| retire_detail(&trace.retires[retire_index])),
+            retire: (retire != NO_RECORD).then(|| retire_detail(&trace.retires[retire as usize])),
         })
     }
+}
+
+/// Buckets record indexes by row: `order[offsets[r]..offsets[r + 1]]` holds
+/// row `r`'s records in their original order. Records without a row are
+/// dropped.
+fn group_by_row(
+    row_count: usize,
+    record_rows: impl Iterator<Item = Option<usize>> + Clone,
+) -> (Vec<u32>, Vec<u32>) {
+    let mut offsets = vec![0u32; row_count + 1];
+    for rank in record_rows.clone().flatten() {
+        offsets[rank + 1] += 1;
+    }
+    for rank in 0..row_count {
+        offsets[rank + 1] += offsets[rank];
+    }
+
+    let mut cursor = offsets[..row_count].to_vec();
+    let mut order = vec![0u32; offsets[row_count] as usize];
+    for (record_index, rank) in record_rows.enumerate() {
+        if let Some(rank) = rank {
+            order[cursor[rank] as usize] = index_u32(record_index);
+            cursor[rank] += 1;
+        }
+    }
+    (offsets, order)
+}
+
+fn index_u32(index: usize) -> u32 {
+    u32::try_from(index).expect("trace record count fits in u32")
 }
 
 pub fn timeline_cell_at(row: &TimelineRow, cycle: u64) -> Option<&TimelineCell> {
@@ -1331,14 +990,6 @@ pub fn timeline_cell_at(row: &TimelineRow, cycle: u64) -> Option<&TimelineCell> 
         .iter()
         .find(|span| cycle >= span.cycle && cycle < span.cycle.saturating_add(span.duration))
         .map(|span| &span.cell)
-}
-
-fn timeline_cell_at_view(row: &TimelineRowView, trace: &Trace, cycle: u64) -> Option<TimelineCell> {
-    row.span_indexes
-        .iter()
-        .map(|&span_index| &trace.spans[span_index])
-        .find(|span| cycle >= span.cycle && cycle < span.cycle.saturating_add(span.duration))
-        .map(|span| timeline_cell(&span.stage, &span.lane))
 }
 
 fn insert_timeline_span(spans: &mut Vec<TimelineSpan>, span: TimelineSpan) {
@@ -1492,6 +1143,22 @@ fn instruction_label(instruction: &Instruction) -> String {
         (None, Some(asm)) => format!("#{} {asm}", instruction.inst_id),
         (None, None) => format!("#{}", instruction.inst_id),
     }
+}
+
+/// Width of the widest `instruction_label`, measured without formatting.
+fn max_label_width(trace: &Trace) -> usize {
+    trace
+        .instructions
+        .iter()
+        .map(|instruction| {
+            let digits = instruction.inst_id.checked_ilog10().unwrap_or(0) as usize + 1;
+            let attr_width = |key| {
+                attr_value(&instruction.attrs, key).map_or(0, |value| value.chars().count() + 1)
+            };
+            1 + digits + attr_width("pc") + attr_width("asm")
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 fn attr_value<'a>(attrs: &'a [KeyValue], key: &str) -> Option<&'a str> {
